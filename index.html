@@ -37,7 +37,7 @@
 <body class="bg-[#F8FAFC] text-slate-900 pb-20">
 
     <div id="app">
-        <!-- Spinner de carregamento inicial rápido -->
+        <!-- Spinner de carregamento inicial -->
         <div class="h-screen flex items-center justify-center bg-slate-900">
             <div class="flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
@@ -76,11 +76,11 @@
         // --- Funções de Inicialização Segura ---
         async function startApp() {
             try {
-                // Acesso explícito aos objetos globais injetados
-                const configStr = typeof window.__firebase_config !== 'undefined' ? window.__firebase_config : '{}';
-                const firebaseConfig = JSON.parse(configStr);
+                // Acesso aos objetos globais
+                const configEnv = typeof window.__firebase_config !== 'undefined' ? window.__firebase_config : '{}';
+                const firebaseConfig = typeof configEnv === 'string' ? JSON.parse(configEnv) : configEnv;
                 
-                if (firebaseConfig.apiKey) {
+                if (firebaseConfig && firebaseConfig.apiKey) {
                     const app = initializeApp(firebaseConfig);
                     auth = getAuth(app);
                     db = getFirestore(app);
@@ -96,7 +96,7 @@
                         render();
                     });
 
-                    // Regra 3: Autenticar PRIMEIRO e aguardar
+                    // REGRA 3: Autenticar PRIMEIRO e aguardar
                     await initAuth();
                     state.isFirebaseInitialized = true;
                 } else {
@@ -128,11 +128,10 @@
                 if (snapshot.exists()) {
                     state.storedPassword = snapshot.data().password || 'admin2026';
                 } else {
-                    // Tenta criar se não existir (se tiver permissão)
                     setDoc(settingsDoc, { password: 'admin2026' }).catch(() => {});
                 }
                 render();
-            }, (err) => console.warn("Aviso: Configurações de senha não puderam ser lidas. Usando padrão."));
+            }, (err) => console.warn("Configurações não lidas. Usando padrão."));
         }
 
         function subscribeToData() {
@@ -211,23 +210,26 @@
         window.openDeleteModal = (id) => { state.deleteId = id; render(); };
         window.closeDeleteModal = () => { state.deleteId = null; render(); };
 
+        // --- FUNÇÃO DE SALVAMENTO CORRIGIDA ---
         window.saveTransaction = async (event) => {
             event.preventDefault();
             
-            // Verificação crucial de Auth e Estado de Salvamento
-            if (!state.user) {
-                alert("Conexão com a nuvem ainda não estabelecida. Aguarde um instante.");
+            // Garantir que não está a salvar duplicado
+            if (state.isSaving) return;
+
+            // REGRA 3: Validar utilizador antes da operação
+            if (!state.user || !auth.currentUser) {
+                alert("Sistema desconectado da nuvem. A tentar religar...");
+                await initAuth();
                 return;
             }
-
-            if (state.isSaving) return;
 
             const form = event.target;
             const rawValue = form.amount.value.replace(/\./g, '').replace(',', '.');
             const amount = parseFloat(rawValue);
 
             if (isNaN(amount) || amount <= 0) {
-                alert("Introduza um valor válido superior a zero.");
+                alert("Por favor, insira um valor válido.");
                 return;
             }
 
@@ -245,11 +247,11 @@
                 category: cat,
                 installments: isFixed ? 1 : parseInt(form.installments.value),
                 createdAt: new Date().toISOString(),
-                userId: state.user.uid
+                userId: auth.currentUser.uid
             };
 
             try {
-                // Regra 1: Caminho estrito de dados públicos
+                // REGRA 1: Caminho estrito de dados públicos
                 const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
                 await addDoc(colRef, data);
                 
@@ -257,10 +259,10 @@
                 state.isSaving = false;
                 render();
             } catch (e) {
-                console.error("Erro ao salvar no Firestore:", e);
+                console.error("Erro Firestore:", e);
                 state.isSaving = false;
                 render();
-                alert("Falha ao salvar. Detalhes: " + e.message);
+                alert("Erro ao guardar na nuvem: " + e.message);
             }
         };
 
@@ -290,297 +292,300 @@
 
         // --- Renderização ---
         function render() {
-            const appDiv = document.getElementById('app');
-            if (!appDiv) return;
+            try {
+                const appDiv = document.getElementById('app');
+                if (!appDiv) return;
 
-            // TELA DE LOGIN
-            if (!state.isAuthorized) {
-                appDiv.innerHTML = `
-                    <div class="h-screen login-screen flex flex-col items-center justify-center px-4 fade-in text-white">
-                        <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl w-full max-w-sm text-center border border-white/10">
-                            <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-xl shadow-blue-500/20">
-                                <i data-lucide="lock" class="w-8 h-8"></i>
+                if (!state.isAuthorized) {
+                    appDiv.innerHTML = `
+                        <div class="h-screen login-screen flex flex-col items-center justify-center px-4 fade-in text-white">
+                            <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl w-full max-w-sm text-center border border-white/10">
+                                <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-xl shadow-blue-500/20">
+                                    <i data-lucide="lock" class="w-8 h-8"></i>
+                                </div>
+                                <h1 class="text-2xl font-black text-slate-800 mb-2">Visões Filmes</h1>
+                                <p class="text-slate-400 text-sm mb-8 font-medium italic">Gestão Financeira Administrativa</p>
+                                <form onsubmit="tryLogin(event)" class="space-y-4 text-slate-800">
+                                    <input name="password" type="password" required placeholder="Senha de acesso" 
+                                        class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-600/10 focus:border-blue-600/30 font-bold text-center tracking-widest transition-all">
+                                    <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-500/20 active:scale-95 transition-transform">
+                                        Entrar no Painel
+                                    </button>
+                                </form>
+                                <div class="mt-8 flex items-center justify-center gap-2">
+                                    <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
+                                    <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest">
+                                        ${state.user ? 'Ligação Segura' : 'A ligar...'}
+                                    </p>
+                                </div>
                             </div>
-                            <h1 class="text-2xl font-black text-slate-800 mb-2">Visões Filmes</h1>
-                            <p class="text-slate-400 text-sm mb-8 font-medium italic">Gestão Financeira Administrativa</p>
-                            <form onsubmit="tryLogin(event)" class="space-y-4 text-slate-800">
-                                <input name="password" type="password" required placeholder="Senha de acesso" 
-                                    class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-600/10 focus:border-blue-600/30 font-bold text-center tracking-widest transition-all">
-                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-600/20 active:scale-95 transition-transform">
-                                    Entrar no Painel
-                                </button>
-                            </form>
-                            <div class="mt-8 flex items-center justify-center gap-2">
-                                <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
-                                <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest">
-                                    ${state.user ? 'Ligação Segura' : 'A ligar...'}
-                                </p>
+                        </div>
+                    `;
+                    if (window.lucide) lucide.createIcons();
+                    return;
+                }
+
+                // Cálculos
+                const filteredData = [];
+                let monthlyTotal = 0;
+                const today = new Date();
+                today.setHours(0,0,0,0);
+                const reminders = [];
+
+                state.transactions.forEach(t => {
+                    const tDate = new Date(t.date);
+                    const startM = tDate.getUTCMonth();
+                    const startYear = tDate.getUTCFullYear();
+                    const currentViewDate = new Date(Date.UTC(state.currentYear, state.currentMonth, 1));
+                    const transStartDate = new Date(Date.UTC(startYear, startM, 1));
+
+                    if (t.category === 'Fixos') {
+                        if (currentViewDate >= transStartDate && t.profile === state.activeProfile) {
+                            monthlyTotal += t.amount;
+                            filteredData.push({ ...t, displayAmount: t.amount, isRecurring: true });
+                        }
+                    } 
+                    else {
+                        for (let i = 0; i < (t.installments || 1); i++) {
+                            const instDate = new Date(Date.UTC(startYear, startM + i, 1));
+                            if (instDate.getUTCMonth() === state.currentMonth && instDate.getUTCFullYear() === state.currentYear && t.profile === state.activeProfile) {
+                                const val = t.amount / (t.installments || 1);
+                                monthlyTotal += val;
+                                filteredData.push({ ...t, displayAmount: val, currentInstallment: i + 1 });
+                            }
+                        }
+                    }
+
+                    if (t.profile === state.activeProfile && currentViewDate >= transStartDate) {
+                        const diff = (tDate - today) / (1000 * 60 * 60 * 24);
+                        if (diff >= 0 && diff <= 7) reminders.push(t);
+                    }
+                });
+
+                const monthName = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][state.currentMonth];
+                const formatBRL = (val) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+
+                appDiv.innerHTML = `
+                    <div class="fade-in">
+                        <header class="bg-slate-900 text-white shadow-xl">
+                            <div class="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row justify-between items-center gap-4">
+                                <div class="flex items-center gap-4">
+                                    <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20">
+                                        <i data-lucide="film" class="w-7 h-7"></i>
+                                    </div>
+                                    <div>
+                                        <h1 class="text-2xl font-black uppercase tracking-tight leading-none">Visões Filmes</h1>
+                                        <p class="text-blue-400 text-[10px] font-bold uppercase tracking-[0.2em] mt-1">Gestão Plinio & Lilian</p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <button onclick="exportCSV()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Baixar Planilha">
+                                        <i data-lucide="download" class="w-5 h-5"></i>
+                                    </button>
+                                    <button onclick="toggleSettingsModal(true)" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Configurações">
+                                        <i data-lucide="settings" class="w-5 h-5"></i>
+                                    </button>
+                                    <div class="px-3 py-1.5 bg-green-500/20 text-green-400 rounded-xl text-[10px] font-black uppercase flex items-center gap-2">
+                                        <i data-lucide="shield-check" class="w-3 h-3"></i> Protegido
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="max-w-5xl mx-auto px-4 pb-4">
+                                <div class="flex gap-2 overflow-x-auto no-scrollbar py-2 border-t border-white/5">
+                                    ${state.profiles.map(p => `
+                                        <button onclick="setActiveProfile('${p}')" class="flex-shrink-0 px-6 py-2.5 rounded-xl text-xs font-black transition-all ${state.activeProfile === p ? 'bg-blue-600 text-white shadow-lg' : 'bg-white/5 text-white/40 hover:text-white'}">
+                                            ${p}
+                                        </button>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </header>
+
+                        <main class="max-w-5xl mx-auto px-4 mt-8">
+                            <button onclick="toggleModal(true)" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl shadow-blue-500/20 mb-8 active:scale-95 transition-transform">
+                                <i data-lucide="plus" class="w-6 h-6"></i> Novo Lançamento
+                            </button>
+
+                            <div class="flex items-center justify-between bg-white p-6 rounded-[2.5rem] border border-slate-200 mb-8 shadow-sm">
+                                <button onclick="adjustMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-left"></i></button>
+                                <div class="text-center">
+                                    <h2 class="text-xl font-black text-slate-800 uppercase tracking-tighter">${monthName} ${state.currentYear}</h2>
+                                    <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Status Financeiro</p>
+                                </div>
+                                <button onclick="adjustMonth(1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-right"></i></button>
+                            </div>
+
+                            ${state.isLoadingData ? `
+                                <div class="py-20 text-center space-y-4">
+                                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest italic">A ler dados da nuvem...</p>
+                                </div>
+                            ` : `
+                                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                                    <div class="lg:col-span-2 space-y-8">
+                                        <div class="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm relative overflow-hidden group">
+                                            <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Mensal (${state.activeProfile})</span>
+                                            <div class="text-5xl font-black mt-4 flex items-baseline gap-2 text-slate-900 tracking-tight">
+                                                ${formatBRL(monthlyTotal)}
+                                            </div>
+                                            <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-xs uppercase">
+                                                <i data-lucide="check-circle" class="w-4 h-4"></i> Nuvem Sincronizada
+                                            </div>
+                                        </div>
+
+                                        <div class="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden mb-10">
+                                            <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                                                <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos</h3>
+                                                <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">${filteredData.length} itens</span>
+                                            </div>
+                                            <div class="divide-y divide-slate-100">
+                                                ${filteredData.length > 0 ? filteredData.map(item => `
+                                                    <div class="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors group">
+                                                        <div class="flex items-center gap-4">
+                                                            <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-2xl">
+                                                                <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.installments > 1 ? 'credit-card' : 'calendar')}" class="w-5 h-5"></i>
+                                                            </div>
+                                                            <div>
+                                                                <h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4>
+                                                                <div class="flex gap-2 items-center mt-1">
+                                                                    <p class="text-[9px] ${item.category === 'Financiamento' ? 'bg-emerald-100 text-emerald-600' : (item.isRecurring ? 'bg-purple-100 text-purple-600' : 'bg-slate-100 text-slate-500')} font-black px-1.5 py-0.5 rounded uppercase tracking-wider">${item.category || 'Geral'}</p>
+                                                                    <p class="text-[10px] text-slate-400 font-bold uppercase">
+                                                                        ${item.isRecurring ? 'Mensal' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div class="flex items-center gap-4">
+                                                            <span class="font-black text-slate-900 text-sm">${formatBRL(item.displayAmount)}</span>
+                                                            <button onclick="openDeleteModal('${item.id}')" class="text-slate-300 hover:text-red-500 transition-all active:scale-90 p-1">
+                                                                <i data-lucide="trash-2" class="w-5 h-5"></i>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum gasto para este período.</div>'}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="space-y-8">
+                                        <div class="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                                            <h3 class="font-black text-slate-800 mb-6 flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-orange-500">
+                                                <i data-lucide="bell" class="w-4 h-4"></i> Vencimentos Próximos
+                                            </h3>
+                                            <div class="space-y-4">
+                                                ${reminders.length > 0 ? reminders.map(r => `
+                                                    <div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-2xl transition-all hover:bg-orange-50">
+                                                        <p class="text-xs font-black text-slate-700 truncate">${r.description}</p>
+                                                        <p class="text-[10px] text-orange-600 font-bold mt-1">Data: ${new Date(r.date).toLocaleDateString('pt-BR')}</p>
+                                                    </div>
+                                                `).join('') : '<div class="text-center py-6 opacity-30 italic text-xs font-bold uppercase">Sem contas vencendo</div>'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `}
+                        </main>
+
+                        <!-- MODAL LANÇAMENTO -->
+                        <div id="modal" class="${state.showModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
+                            <div class="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+                                <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                                    <h3 class="text-2xl font-black text-slate-800 tracking-tight">Novo Lançamento</h3>
+                                    <button onclick="toggleModal(false)" class="text-slate-400 hover:text-slate-600 p-2" ${state.isSaving ? 'disabled' : ''}><i data-lucide="x"></i></button>
+                                </div>
+                                <form onsubmit="saveTransaction(event)" class="p-10 space-y-6">
+                                    <div>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">O que comprou?</label>
+                                        <input name="description" required type="text" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" placeholder="Ex: Equipamento, Financiamento...">
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Valor (R$)</label>
+                                            <div class="relative">
+                                                <span class="absolute left-6 top-4 font-bold text-slate-400">R$</span>
+                                                <input name="amount" required type="text" oninput="maskCurrency(this)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl pl-12 pr-6 py-4 outline-none focus:border-blue-600/30 font-black" placeholder="0,00">
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Data</label>
+                                            <input name="date" required type="date" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" value="${new Date().toISOString().split('T')[0]}">
+                                        </div>
+                                    </div>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block text-blue-600 font-black">Categoria</label>
+                                            <select name="category" onchange="updateModalCategory(this.value)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold appearance-none">
+                                                <option value="Gasto Mensal">Gasto Mensal</option>
+                                                <option value="Cartão">Cartão de Crédito</option>
+                                                <option value="Fixos">Custos Fixos (Recorrente)</option>
+                                                <option value="Financiamento">Financiamento</option>
+                                                <option value="Investimentos">Investimentos</option>
+                                                <option value="Outros">Outros</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Responsável</label>
+                                            <select name="profile" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">
+                                                ${state.profiles.map(p => `<option value="${p}" ${state.activeProfile === p ? 'selected' : ''}>${p}</option>`).join('')}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Parcelas</label>
+                                        <select name="installments" ${state.modalCategory === 'Fixos' ? 'disabled' : ''} class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">
+                                            ${state.modalCategory === 'Fixos' ? 
+                                                '<option value="1">Mensalidade Recorrente</option>' : 
+                                                (state.modalCategory === 'Financiamento' ? 
+                                                    [12, 24, 36, 48, 60, 120, 180, 240, 360].map(n => `<option value="${n}">${n}x parcelas</option>`).join('') :
+                                                    [...Array(24)].map((_, i) => `<option value="${i+1}">${i+1}x sem juros</option>`).join('')
+                                                )
+                                            }
+                                        </select>
+                                    </div>
+                                    <button type="submit" ${state.isSaving ? 'disabled' : ''} class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl shadow-blue-500/20 active:scale-[0.98] transition-all mt-4 flex items-center justify-center gap-2">
+                                        ${state.isSaving ? '<div class="animate-spin h-5 w-5 border-2 border-white/30 border-b-white rounded-full"></div> A guardar...' : 'Guardar na Nuvem'}
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+
+                        <!-- MODAL DELETAR -->
+                        <div id="deleteModal" class="${state.deleteId ? 'fixed' : 'hidden'} inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md">
+                            <div class="bg-white w-full max-w-xs rounded-[3rem] shadow-2xl p-10 text-center border border-red-50">
+                                <div class="bg-red-50 w-20 h-20 rounded-[2rem] flex items-center justify-center text-red-500 mx-auto mb-6">
+                                    <i data-lucide="alert-circle" class="w-10 h-10"></i>
+                                </div>
+                                <h3 class="text-2xl font-black text-slate-800 mb-2">Apagar?</h3>
+                                <p class="text-slate-500 text-sm mb-8">Esta ação não pode ser desfeita na nuvem.</p>
+                                <div class="flex flex-col gap-3">
+                                    <button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-2xl shadow-lg active:scale-95 transition-transform uppercase text-xs">Sim, Eliminar</button>
+                                    <button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-2xl active:scale-95 transition-transform uppercase text-xs">Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- MODAL CONFIGURAÇÕES -->
+                        <div id="settingsModal" class="${state.showSettingsModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
+                            <div class="bg-white w-full max-w-sm rounded-[3.5rem] shadow-2xl overflow-hidden">
+                                <div class="p-8 border-b border-slate-100 flex justify-between items-center">
+                                    <h3 class="text-xl font-black text-slate-800 flex items-center gap-2"><i data-lucide="lock" class="w-5 h-5 text-blue-600"></i> Segurança</h3>
+                                    <button onclick="toggleSettingsModal(false)" class="text-slate-400 hover:text-slate-600 p-2"><i data-lucide="x"></i></button>
+                                </div>
+                                <form onsubmit="updatePassword(event)" class="p-10 space-y-6">
+                                    <div>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Nova Senha</label>
+                                        <input name="newPassword" required type="password" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold text-center tracking-widest">
+                                    </div>
+                                    <button type="submit" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-transform uppercase text-xs">Atualizar</button>
+                                </form>
                             </div>
                         </div>
                     </div>
                 `;
                 if (window.lucide) lucide.createIcons();
-                return;
+            } catch (err) {
+                console.error("Erro ao renderizar:", err);
             }
-
-            // TELA PRINCIPAL
-            const filteredData = [];
-            let monthlyTotal = 0;
-            const today = new Date();
-            today.setHours(0,0,0,0);
-            const reminders = [];
-
-            state.transactions.forEach(t => {
-                const tDate = new Date(t.date);
-                const startM = tDate.getUTCMonth();
-                const startYear = tDate.getUTCFullYear();
-                const currentViewDate = new Date(Date.UTC(state.currentYear, state.currentMonth, 1));
-                const transStartDate = new Date(Date.UTC(startYear, startM, 1));
-
-                if (t.category === 'Fixos') {
-                    if (currentViewDate >= transStartDate && t.profile === state.activeProfile) {
-                        monthlyTotal += t.amount;
-                        filteredData.push({ ...t, displayAmount: t.amount, isRecurring: true });
-                    }
-                } 
-                else {
-                    for (let i = 0; i < (t.installments || 1); i++) {
-                        const instDate = new Date(Date.UTC(startYear, startM + i, 1));
-                        if (instDate.getUTCMonth() === state.currentMonth && instDate.getUTCFullYear() === state.currentYear && t.profile === state.activeProfile) {
-                            const val = t.amount / (t.installments || 1);
-                            monthlyTotal += val;
-                            filteredData.push({ ...t, displayAmount: val, currentInstallment: i + 1 });
-                        }
-                    }
-                }
-
-                if (t.profile === state.activeProfile && currentViewDate >= transStartDate) {
-                    const diff = (tDate - today) / (1000 * 60 * 60 * 24);
-                    if (diff >= 0 && diff <= 7) reminders.push(t);
-                }
-            });
-
-            const monthName = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][state.currentMonth];
-            const formatBRL = (val) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
-            appDiv.innerHTML = `
-                <div class="fade-in">
-                    <header class="bg-slate-900 text-white shadow-xl">
-                        <div class="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row justify-between items-center gap-4">
-                            <div class="flex items-center gap-4">
-                                <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20">
-                                    <i data-lucide="film" class="w-7 h-7"></i>
-                                </div>
-                                <div>
-                                    <h1 class="text-2xl font-black uppercase tracking-tight leading-none">Visões Filmes</h1>
-                                    <p class="text-blue-400 text-[10px] font-bold uppercase tracking-[0.2em] mt-1">Gestão Plinio & Lilian</p>
-                                </div>
-                            </div>
-                            <div class="flex items-center gap-3">
-                                <button onclick="exportCSV()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Baixar Planilha">
-                                    <i data-lucide="download" class="w-5 h-5"></i>
-                                </button>
-                                <button onclick="toggleSettingsModal(true)" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Configurações">
-                                    <i data-lucide="settings" class="w-5 h-5"></i>
-                                </button>
-                                <div class="px-3 py-1.5 bg-green-500/20 text-green-400 rounded-xl text-[10px] font-black uppercase flex items-center gap-2">
-                                    <i data-lucide="shield-check" class="w-3 h-3"></i> Protegido
-                                </div>
-                            </div>
-                        </div>
-                        <div class="max-w-5xl mx-auto px-4 pb-4">
-                            <div class="flex gap-2 overflow-x-auto no-scrollbar py-2 border-t border-white/5">
-                                ${state.profiles.map(p => `
-                                    <button onclick="setActiveProfile('${p}')" class="flex-shrink-0 px-6 py-2.5 rounded-xl text-xs font-black transition-all ${state.activeProfile === p ? 'bg-blue-600 text-white shadow-lg' : 'bg-white/5 text-white/40 hover:text-white'}">
-                                        ${p}
-                                    </button>
-                                `).join('')}
-                            </div>
-                        </div>
-                    </header>
-
-                    <main class="max-w-5xl mx-auto px-4 mt-8">
-                        <button onclick="toggleModal(true)" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl shadow-blue-600/20 mb-8 active:scale-95 transition-transform">
-                            <i data-lucide="plus" class="w-6 h-6"></i> Novo Lançamento
-                        </button>
-
-                        <div class="flex items-center justify-between bg-white p-6 rounded-[2.5rem] border border-slate-200 mb-8 shadow-sm">
-                            <button onclick="adjustMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-left"></i></button>
-                            <div class="text-center">
-                                <h2 class="text-xl font-black text-slate-800 uppercase tracking-tighter">${monthName} ${state.currentYear}</h2>
-                                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Status Financeiro</p>
-                            </div>
-                            <button onclick="adjustMonth(1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-right"></i></button>
-                        </div>
-
-                        ${state.isLoadingData ? `
-                            <div class="py-20 text-center space-y-4">
-                                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-                                <p class="text-slate-400 text-xs font-bold uppercase tracking-widest italic">A ler dados da nuvem...</p>
-                            </div>
-                        ` : `
-                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                <div class="lg:col-span-2 space-y-8">
-                                    <div class="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm relative overflow-hidden group">
-                                        <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Mensal (${state.activeProfile})</span>
-                                        <div class="text-5xl font-black mt-4 flex items-baseline gap-2 text-slate-900 tracking-tight">
-                                            ${formatBRL(monthlyTotal)}
-                                        </div>
-                                        <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-xs uppercase">
-                                            <i data-lucide="check-circle" class="w-4 h-4"></i> Nuvem Sincronizada
-                                        </div>
-                                    </div>
-
-                                    <div class="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden mb-10">
-                                        <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                            <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos</h3>
-                                            <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">${filteredData.length} itens</span>
-                                        </div>
-                                        <div class="divide-y divide-slate-100">
-                                            ${filteredData.length > 0 ? filteredData.map(item => `
-                                                <div class="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors group">
-                                                    <div class="flex items-center gap-4">
-                                                        <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-2xl">
-                                                            <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.installments > 1 ? 'credit-card' : 'calendar')}" class="w-5 h-5"></i>
-                                                        </div>
-                                                        <div>
-                                                            <h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4>
-                                                            <div class="flex gap-2 items-center mt-1">
-                                                                <p class="text-[9px] ${item.category === 'Financiamento' ? 'bg-emerald-100 text-emerald-600' : (item.isRecurring ? 'bg-purple-100 text-purple-600' : 'bg-slate-100 text-slate-500')} font-black px-1.5 py-0.5 rounded uppercase tracking-wider">${item.category || 'Geral'}</p>
-                                                                <p class="text-[10px] text-slate-400 font-bold uppercase">
-                                                                    ${item.isRecurring ? 'Mensal' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}
-                                                                </p>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div class="flex items-center gap-4">
-                                                        <span class="font-black text-slate-900 text-sm">${formatBRL(item.displayAmount)}</span>
-                                                        <button onclick="openDeleteModal('${item.id}')" class="text-slate-300 hover:text-red-500 transition-all active:scale-90 p-1">
-                                                            <i data-lucide="trash-2" class="w-5 h-5"></i>
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum gasto para este período.</div>'}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="space-y-8">
-                                    <div class="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
-                                        <h3 class="font-black text-slate-800 mb-6 flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-orange-500">
-                                            <i data-lucide="bell" class="w-4 h-4"></i> Vencimentos Próximos
-                                        </h3>
-                                        <div class="space-y-4">
-                                            ${reminders.length > 0 ? reminders.map(r => `
-                                                <div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-2xl transition-all hover:bg-orange-50">
-                                                    <p class="text-xs font-black text-slate-700 truncate">${r.description}</p>
-                                                    <p class="text-[10px] text-orange-600 font-bold mt-1">Data: ${new Date(r.date).toLocaleDateString('pt-BR')}</p>
-                                                </div>
-                                            `).join('') : '<div class="text-center py-6 opacity-30 italic text-xs font-bold uppercase">Sem contas vencendo</div>'}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        `}
-                    </main>
-
-                    <!-- MODAL LANÇAMENTO -->
-                    <div id="modal" class="${state.showModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
-                        <div class="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-                            <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                <h3 class="text-2xl font-black text-slate-800 tracking-tight">Novo Lançamento</h3>
-                                <button onclick="toggleModal(false)" class="text-slate-400 hover:text-slate-600 p-2" ${state.isSaving ? 'disabled' : ''}><i data-lucide="x"></i></button>
-                            </div>
-                            <form onsubmit="saveTransaction(event)" class="p-10 space-y-6">
-                                <div>
-                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">O que comprou?</label>
-                                    <input name="description" required type="text" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" placeholder="Ex: Equipamento, Financiamento...">
-                                </div>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Valor (R$)</label>
-                                        <div class="relative">
-                                            <span class="absolute left-6 top-4 font-bold text-slate-400">R$</span>
-                                            <input name="amount" required type="text" oninput="maskCurrency(this)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl pl-12 pr-6 py-4 outline-none focus:border-blue-600/30 font-black" placeholder="0,00">
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Data</label>
-                                        <input name="date" required type="date" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" value="${new Date().toISOString().split('T')[0]}">
-                                    </div>
-                                </div>
-                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block text-blue-600 font-black">Categoria</label>
-                                        <select name="category" onchange="updateModalCategory(this.value)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold appearance-none">
-                                            <option value="Gasto Mensal">Gasto Mensal</option>
-                                            <option value="Cartão">Cartão de Crédito</option>
-                                            <option value="Fixos">Custos Fixos (Recorrente)</option>
-                                            <option value="Financiamento">Financiamento</option>
-                                            <option value="Investimentos">Investimentos</option>
-                                            <option value="Outros">Outros</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Responsável</label>
-                                        <select name="profile" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">
-                                            ${state.profiles.map(p => `<option value="${p}" ${state.activeProfile === p ? 'selected' : ''}>${p}</option>`).join('')}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Parcelas</label>
-                                    <select name="installments" ${state.modalCategory === 'Fixos' ? 'disabled' : ''} class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">
-                                        ${state.modalCategory === 'Fixos' ? 
-                                            '<option value="1">Mensalidade Recorrente</option>' : 
-                                            (state.modalCategory === 'Financiamento' ? 
-                                                [12, 24, 36, 48, 60, 120, 180, 240, 360].map(n => `<option value="${n}">${n}x parcelas</option>`).join('') :
-                                                [...Array(24)].map((_, i) => `<option value="${i+1}">${i+1}x sem juros</option>`).join('')
-                                            )
-                                        }
-                                    </select>
-                                </div>
-                                <button type="submit" ${state.isSaving ? 'disabled' : ''} class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl shadow-blue-500/20 active:scale-[0.98] transition-all mt-4 flex items-center justify-center gap-2">
-                                    ${state.isSaving ? '<div class="animate-spin h-5 w-5 border-2 border-white/30 border-b-white rounded-full"></div> Sincronizando...' : 'Guardar na Nuvem'}
-                                </button>
-                            </form>
-                        </div>
-                    </div>
-
-                    <!-- MODAL DELETAR -->
-                    <div id="deleteModal" class="${state.deleteId ? 'fixed' : 'hidden'} inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md">
-                        <div class="bg-white w-full max-w-xs rounded-[3rem] shadow-2xl p-10 text-center border border-red-50">
-                            <div class="bg-red-50 w-20 h-20 rounded-[2rem] flex items-center justify-center text-red-500 mx-auto mb-6">
-                                <i data-lucide="alert-circle" class="w-10 h-10"></i>
-                            </div>
-                            <h3 class="text-2xl font-black text-slate-800 mb-2">Apagar?</h3>
-                            <p class="text-slate-500 text-sm mb-8">Esta ação não pode ser desfeita na nuvem.</p>
-                            <div class="flex flex-col gap-3">
-                                <button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-2xl shadow-lg active:scale-95 transition-transform uppercase text-xs">Sim, Eliminar</button>
-                                <button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-2xl active:scale-95 transition-transform uppercase text-xs">Cancelar</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- MODAL CONFIGURAÇÕES -->
-                    <div id="settingsModal" class="${state.showSettingsModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
-                        <div class="bg-white w-full max-w-sm rounded-[3.5rem] shadow-2xl overflow-hidden">
-                            <div class="p-8 border-b border-slate-100 flex justify-between items-center">
-                                <h3 class="text-xl font-black text-slate-800 flex items-center gap-2"><i data-lucide="lock" class="w-5 h-5 text-blue-600"></i> Segurança</h3>
-                                <button onclick="toggleSettingsModal(false)" class="text-slate-400 hover:text-slate-600 p-2"><i data-lucide="x"></i></button>
-                            </div>
-                            <form onsubmit="updatePassword(event)" class="p-10 space-y-6">
-                                <div>
-                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Nova Senha</label>
-                                    <input name="newPassword" required type="password" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold text-center tracking-widest">
-                                </div>
-                                <button type="submit" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-transform uppercase text-xs">Atualizar</button>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-            `;
-            if (window.lucide) lucide.createIcons();
         }
 
         startApp();
