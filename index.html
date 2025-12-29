@@ -18,7 +18,6 @@
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
         }
 
-        /* Animação suave para troca de telas */
         .fade-in {
             animation: fadeIn 0.3s ease-in-out;
         }
@@ -28,7 +27,6 @@
             to { opacity: 1; }
         }
 
-        /* Efeito de desativado */
         select:disabled {
             opacity: 0.5;
             cursor: not-allowed;
@@ -43,7 +41,7 @@
         <div class="h-screen flex items-center justify-center bg-slate-900">
             <div class="flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-                <p class="text-white/50 text-xs font-bold uppercase tracking-widest">Iniciando Visões Filmes...</p>
+                <p class="text-white/50 text-xs font-bold uppercase tracking-widest text-center px-4">A ligar ao sistema seguro da Visões Filmes...</p>
             </div>
         </div>
     </div>
@@ -68,6 +66,7 @@
             showSettingsModal: false,
             isLoadingData: true,
             isFirebaseInitialized: false,
+            isSaving: false,
             deleteId: null,
             modalCategory: 'Gasto Mensal' 
         };
@@ -77,16 +76,17 @@
         // --- Funções de Inicialização Segura ---
         async function startApp() {
             try {
-                const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+                // Acesso explícito aos objetos globais injetados
+                const configStr = typeof window.__firebase_config !== 'undefined' ? window.__firebase_config : '{}';
                 const firebaseConfig = JSON.parse(configStr);
                 
                 if (firebaseConfig.apiKey) {
                     const app = initializeApp(firebaseConfig);
                     auth = getAuth(app);
                     db = getFirestore(app);
-                    appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-family-app';
-                    state.isFirebaseInitialized = true;
-
+                    appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'finance-family-app';
+                    
+                    // Escuta o estado da autenticação
                     onAuthStateChanged(auth, (user) => {
                         state.user = user;
                         if (user) {
@@ -96,62 +96,64 @@
                         render();
                     });
 
-                    initAuth();
+                    // Regra 3: Autenticar PRIMEIRO e aguardar
+                    await initAuth();
+                    state.isFirebaseInitialized = true;
+                } else {
+                    console.error("Configuração do Firebase ausente.");
                 }
             } catch (e) {
-                console.error("Erro na inicialização:", e);
+                console.error("Erro fatal na inicialização:", e);
             }
             render();
         }
 
         async function initAuth() {
-            if (!state.isFirebaseInitialized) return;
             try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
+                const token = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
+                if (token) {
+                    await signInWithCustomToken(auth, token);
                 } else {
                     await signInAnonymously(auth);
                 }
             } catch (e) {
-                console.error("Auth error:", e);
-                render();
+                console.error("Erro durante autenticação silenciosa:", e);
             }
         }
 
         function subscribeToSettings() {
-            if (!state.user || !state.isFirebaseInitialized) return;
+            if (!state.user || !appId) return;
             const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'app_settings', 'auth');
             onSnapshot(settingsDoc, (snapshot) => {
                 if (snapshot.exists()) {
                     state.storedPassword = snapshot.data().password || 'admin2026';
                 } else {
-                    setDoc(settingsDoc, { password: 'admin2026' });
+                    // Tenta criar se não existir (se tiver permissão)
+                    setDoc(settingsDoc, { password: 'admin2026' }).catch(() => {});
                 }
                 render();
-            });
+            }, (err) => console.warn("Aviso: Configurações de senha não puderam ser lidas. Usando padrão."));
         }
 
         function subscribeToData() {
-            if (!state.user || !state.isFirebaseInitialized) return;
+            if (!state.user || !appId) return;
             const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+            
             onSnapshot(colRef, (snapshot) => {
                 state.transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 state.isLoadingData = false;
                 render();
             }, (error) => {
-                console.error("Firestore error:", error);
+                console.error("Erro ao sincronizar extrato:", error);
                 state.isLoadingData = false;
                 render();
             });
         }
 
-        // --- Máscara de Moeda (Real) ---
+        // --- Máscara de Moeda ---
         window.maskCurrency = (input) => {
             let value = input.value.replace(/\D/g, "");
-            if (value === "") {
-                input.value = "";
-                return;
-            }
+            if (value === "") { input.value = ""; return; }
             let formattedValue = (parseInt(value) / 100).toLocaleString('pt-BR', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2
@@ -173,24 +175,20 @@
         window.updatePassword = async (event) => {
             event.preventDefault();
             const newPassword = event.target.newPassword.value;
-            if (!newPassword || !state.isFirebaseInitialized) return;
+            if (!newPassword || !state.user) return;
 
             try {
                 const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'app_settings', 'auth');
                 await setDoc(settingsDoc, { password: newPassword });
                 state.showSettingsModal = false;
-                alert("Senha atualizada com sucesso!");
+                alert("Senha atualizada!");
                 render();
             } catch (e) {
-                console.error("Erro ao atualizar senha:", e);
+                alert("Erro ao atualizar senha. Verifique a conexão.");
             }
         };
 
-        window.setActiveProfile = (profile) => {
-            state.activeProfile = profile;
-            render();
-        };
-
+        window.setActiveProfile = (profile) => { state.activeProfile = profile; render(); };
         window.adjustMonth = (offset) => {
             state.currentMonth += offset;
             if (state.currentMonth < 0) { state.currentMonth = 11; state.currentYear--; }
@@ -215,16 +213,26 @@
 
         window.saveTransaction = async (event) => {
             event.preventDefault();
-            if (!state.user || !state.isFirebaseInitialized) return;
-
-            const form = event.target;
-            const rawAmount = form.amount.value.replace(/\./g, '').replace(',', '.');
-            const amount = parseFloat(rawAmount);
-
-            if (isNaN(amount) || amount <= 0) {
-                alert("Insira um valor válido.");
+            
+            // Verificação crucial de Auth e Estado de Salvamento
+            if (!state.user) {
+                alert("Conexão com a nuvem ainda não estabelecida. Aguarde um instante.");
                 return;
             }
+
+            if (state.isSaving) return;
+
+            const form = event.target;
+            const rawValue = form.amount.value.replace(/\./g, '').replace(',', '.');
+            const amount = parseFloat(rawValue);
+
+            if (isNaN(amount) || amount <= 0) {
+                alert("Introduza um valor válido superior a zero.");
+                return;
+            }
+
+            state.isSaving = true;
+            render();
 
             const cat = form.category.value;
             const isFixed = cat === 'Fixos';
@@ -241,24 +249,30 @@
             };
 
             try {
+                // Regra 1: Caminho estrito de dados públicos
                 const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
                 await addDoc(colRef, data);
-                toggleModal(false);
+                
+                state.showModal = false;
+                state.isSaving = false;
+                render();
             } catch (e) {
-                console.error("Erro ao salvar:", e);
-                alert("Erro ao salvar dados.");
+                console.error("Erro ao salvar no Firestore:", e);
+                state.isSaving = false;
+                render();
+                alert("Falha ao salvar. Detalhes: " + e.message);
             }
         };
 
         window.confirmDelete = async () => {
-            if (!state.user || !state.isFirebaseInitialized || !state.deleteId) return;
+            if (!state.user || !state.deleteId) return;
             try {
                 const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'transactions', state.deleteId);
                 await deleteDoc(docRef);
                 state.deleteId = null;
                 render();
             } catch (e) {
-                console.error("Erro ao eliminar:", e);
+                alert("Erro ao eliminar da nuvem.");
             }
         };
 
@@ -282,24 +296,24 @@
             // TELA DE LOGIN
             if (!state.isAuthorized) {
                 appDiv.innerHTML = `
-                    <div class="h-screen login-screen flex flex-col items-center justify-center px-4 fade-in">
-                        <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl w-full max-w-sm text-center border border-white/20">
-                            <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-lg shadow-blue-500/30">
+                    <div class="h-screen login-screen flex flex-col items-center justify-center px-4 fade-in text-white">
+                        <div class="bg-white p-8 rounded-[2.5rem] shadow-2xl w-full max-w-sm text-center border border-white/10">
+                            <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-xl shadow-blue-500/20">
                                 <i data-lucide="lock" class="w-8 h-8"></i>
                             </div>
-                            <h1 class="text-2xl font-black text-slate-800 mb-2 tracking-tight">Acesso Restrito</h1>
-                            <p class="text-slate-400 text-sm mb-8 font-medium italic">Visões Filmes & Família</p>
-                            <form onsubmit="tryLogin(event)" class="space-y-4">
-                                <input name="password" type="password" required placeholder="Digite a senha" 
-                                    class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-600/10 focus:border-blue-600/20 font-bold text-center tracking-widest transition-all">
-                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-500/20 active:scale-95 transition-transform">
-                                    Entrar no Sistema
+                            <h1 class="text-2xl font-black text-slate-800 mb-2">Visões Filmes</h1>
+                            <p class="text-slate-400 text-sm mb-8 font-medium italic">Gestão Financeira Administrativa</p>
+                            <form onsubmit="tryLogin(event)" class="space-y-4 text-slate-800">
+                                <input name="password" type="password" required placeholder="Senha de acesso" 
+                                    class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-600/10 focus:border-blue-600/30 font-bold text-center tracking-widest transition-all">
+                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl shadow-blue-600/20 active:scale-95 transition-transform">
+                                    Entrar no Painel
                                 </button>
                             </form>
                             <div class="mt-8 flex items-center justify-center gap-2">
-                                <div class="w-1.5 h-1.5 rounded-full ${state.isFirebaseInitialized ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
-                                <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest italic">
-                                    ${state.isFirebaseInitialized ? 'Sincronização Pronta' : 'A ligar à base de dados...'}
+                                <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
+                                <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest">
+                                    ${state.user ? 'Ligação Segura' : 'A ligar...'}
                                 </p>
                             </div>
                         </div>
@@ -351,7 +365,6 @@
 
             appDiv.innerHTML = `
                 <div class="fade-in">
-                    <!-- Header -->
                     <header class="bg-slate-900 text-white shadow-xl">
                         <div class="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row justify-between items-center gap-4">
                             <div class="flex items-center gap-4">
@@ -387,7 +400,7 @@
                     </header>
 
                     <main class="max-w-5xl mx-auto px-4 mt-8">
-                        <button onclick="toggleModal(true)" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl shadow-blue-500/20 mb-8 active:scale-95 transition-transform">
+                        <button onclick="toggleModal(true)" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl shadow-blue-600/20 mb-8 active:scale-95 transition-transform">
                             <i data-lucide="plus" class="w-6 h-6"></i> Novo Lançamento
                         </button>
 
@@ -395,7 +408,7 @@
                             <button onclick="adjustMonth(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-left"></i></button>
                             <div class="text-center">
                                 <h2 class="text-xl font-black text-slate-800 uppercase tracking-tighter">${monthName} ${state.currentYear}</h2>
-                                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Fluxo Mensal</p>
+                                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Status Financeiro</p>
                             </div>
                             <button onclick="adjustMonth(1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-right"></i></button>
                         </div>
@@ -403,25 +416,25 @@
                         ${state.isLoadingData ? `
                             <div class="py-20 text-center space-y-4">
                                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-                                <p class="text-slate-400 text-xs font-bold uppercase tracking-widest">Sincronizando dados...</p>
+                                <p class="text-slate-400 text-xs font-bold uppercase tracking-widest italic">A ler dados da nuvem...</p>
                             </div>
                         ` : `
                             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                                 <div class="lg:col-span-2 space-y-8">
                                     <div class="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm relative overflow-hidden group">
-                                        <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Previsto (${state.activeProfile})</span>
+                                        <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Mensal (${state.activeProfile})</span>
                                         <div class="text-5xl font-black mt-4 flex items-baseline gap-2 text-slate-900 tracking-tight">
                                             ${formatBRL(monthlyTotal)}
                                         </div>
                                         <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-xs uppercase">
-                                            <i data-lucide="check-circle" class="w-4 h-4"></i> Dados Sincronizados
+                                            <i data-lucide="check-circle" class="w-4 h-4"></i> Nuvem Sincronizada
                                         </div>
                                     </div>
 
                                     <div class="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden mb-10">
                                         <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                            <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos do Mês</h3>
-                                            <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black tracking-widest">${filteredData.length} ITENS</span>
+                                            <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos</h3>
+                                            <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black tracking-widest uppercase">${filteredData.length} itens</span>
                                         </div>
                                         <div class="divide-y divide-slate-100">
                                             ${filteredData.length > 0 ? filteredData.map(item => `
@@ -435,7 +448,7 @@
                                                             <div class="flex gap-2 items-center mt-1">
                                                                 <p class="text-[9px] ${item.category === 'Financiamento' ? 'bg-emerald-100 text-emerald-600' : (item.isRecurring ? 'bg-purple-100 text-purple-600' : 'bg-slate-100 text-slate-500')} font-black px-1.5 py-0.5 rounded uppercase tracking-wider">${item.category || 'Geral'}</p>
                                                                 <p class="text-[10px] text-slate-400 font-bold uppercase">
-                                                                    ${item.isRecurring ? 'Recorrente' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}
+                                                                    ${item.isRecurring ? 'Mensal' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}
                                                                 </p>
                                                             </div>
                                                         </div>
@@ -447,7 +460,7 @@
                                                         </button>
                                                     </div>
                                                 </div>
-                                            `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum registro encontrado.</div>'}
+                                            `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum gasto para este período.</div>'}
                                         </div>
                                     </div>
                                 </div>
@@ -461,9 +474,9 @@
                                             ${reminders.length > 0 ? reminders.map(r => `
                                                 <div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-2xl transition-all hover:bg-orange-50">
                                                     <p class="text-xs font-black text-slate-700 truncate">${r.description}</p>
-                                                    <p class="text-[10px] text-orange-600 font-bold mt-1">Data Original: ${new Date(r.date).toLocaleDateString('pt-BR')}</p>
+                                                    <p class="text-[10px] text-orange-600 font-bold mt-1">Data: ${new Date(r.date).toLocaleDateString('pt-BR')}</p>
                                                 </div>
-                                            `).join('') : '<div class="text-center py-6 opacity-40 italic text-xs">Tudo em dia.</div>'}
+                                            `).join('') : '<div class="text-center py-6 opacity-30 italic text-xs font-bold uppercase">Sem contas vencendo</div>'}
                                         </div>
                                     </div>
                                 </div>
@@ -476,36 +489,36 @@
                         <div class="bg-white w-full max-w-lg rounded-[3.5rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
                             <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
                                 <h3 class="text-2xl font-black text-slate-800 tracking-tight">Novo Lançamento</h3>
-                                <button onclick="toggleModal(false)" class="text-slate-400 hover:text-slate-600 p-2"><i data-lucide="x"></i></button>
+                                <button onclick="toggleModal(false)" class="text-slate-400 hover:text-slate-600 p-2" ${state.isSaving ? 'disabled' : ''}><i data-lucide="x"></i></button>
                             </div>
                             <form onsubmit="saveTransaction(event)" class="p-10 space-y-6">
                                 <div>
                                     <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">O que comprou?</label>
-                                    <input name="description" required type="text" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold transition-all" placeholder="Ex: Equipamento, Financiamento Carro...">
+                                    <input name="description" required type="text" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" placeholder="Ex: Equipamento, Financiamento...">
                                 </div>
                                 <div class="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Valor Total (R$)</label>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Valor (R$)</label>
                                         <div class="relative">
                                             <span class="absolute left-6 top-4 font-bold text-slate-400">R$</span>
                                             <input name="amount" required type="text" oninput="maskCurrency(this)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl pl-12 pr-6 py-4 outline-none focus:border-blue-600/30 font-black" placeholder="0,00">
                                         </div>
                                     </div>
                                     <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Data de Início</label>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Data</label>
                                         <input name="date" required type="date" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold" value="${new Date().toISOString().split('T')[0]}">
                                     </div>
                                 </div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div>
-                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block text-blue-600">Categoria</label>
+                                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block text-blue-600 font-black">Categoria</label>
                                         <select name="category" onchange="updateModalCategory(this.value)" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold appearance-none">
-                                            <option value="Gasto Mensal" ${state.modalCategory === 'Gasto Mensal' ? 'selected' : ''}>Gasto Mensal</option>
-                                            <option value="Cartão" ${state.modalCategory === 'Cartão' ? 'selected' : ''}>Cartão de Crédito</option>
-                                            <option value="Fixos" ${state.modalCategory === 'Fixos' ? 'selected' : ''}>Custos Fixos (Recorrente)</option>
-                                            <option value="Financiamento" ${state.modalCategory === 'Financiamento' ? 'selected' : ''}>Financiamento</option>
-                                            <option value="Investimentos" ${state.modalCategory === 'Investimentos' ? 'selected' : ''}>Investimentos</option>
-                                            <option value="Outros" ${state.modalCategory === 'Outros' ? 'selected' : ''}>Outros</option>
+                                            <option value="Gasto Mensal">Gasto Mensal</option>
+                                            <option value="Cartão">Cartão de Crédito</option>
+                                            <option value="Fixos">Custos Fixos (Recorrente)</option>
+                                            <option value="Financiamento">Financiamento</option>
+                                            <option value="Investimentos">Investimentos</option>
+                                            <option value="Outros">Outros</option>
                                         </select>
                                     </div>
                                     <div>
@@ -516,51 +529,52 @@
                                     </div>
                                 </div>
                                 <div>
-                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block ${state.modalCategory === 'Fixos' ? 'opacity-30' : ''}">Parcelas</label>
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Parcelas</label>
                                     <select name="installments" ${state.modalCategory === 'Fixos' ? 'disabled' : ''} class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">
                                         ${state.modalCategory === 'Fixos' ? 
-                                            '<option value="1">Gasto Recorrente Mensal</option>' : 
+                                            '<option value="1">Mensalidade Recorrente</option>' : 
                                             (state.modalCategory === 'Financiamento' ? 
-                                                // Opções de longo prazo para Financiamento
                                                 [12, 24, 36, 48, 60, 120, 180, 240, 360].map(n => `<option value="${n}">${n}x parcelas</option>`).join('') :
                                                 [...Array(24)].map((_, i) => `<option value="${i+1}">${i+1}x sem juros</option>`).join('')
                                             )
                                         }
                                     </select>
                                 </div>
-                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl shadow-blue-500/20 active:scale-[0.98] transition-all mt-4">Guardar na Nuvem</button>
+                                <button type="submit" ${state.isSaving ? 'disabled' : ''} class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl shadow-blue-500/20 active:scale-[0.98] transition-all mt-4 flex items-center justify-center gap-2">
+                                    ${state.isSaving ? '<div class="animate-spin h-5 w-5 border-2 border-white/30 border-b-white rounded-full"></div> Sincronizando...' : 'Guardar na Nuvem'}
+                                </button>
                             </form>
                         </div>
                     </div>
 
                     <!-- MODAL DELETAR -->
                     <div id="deleteModal" class="${state.deleteId ? 'fixed' : 'hidden'} inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md">
-                        <div class="bg-white w-full max-w-xs rounded-[3rem] shadow-2xl p-10 text-center animate-in zoom-in duration-300 border border-red-50">
+                        <div class="bg-white w-full max-w-xs rounded-[3rem] shadow-2xl p-10 text-center border border-red-50">
                             <div class="bg-red-50 w-20 h-20 rounded-[2rem] flex items-center justify-center text-red-500 mx-auto mb-6">
                                 <i data-lucide="alert-circle" class="w-10 h-10"></i>
                             </div>
-                            <h3 class="text-2xl font-black text-slate-800 mb-2 tracking-tight">Apagar?</h3>
-                            <p class="text-slate-500 text-sm mb-8 font-medium">Esta ação não pode ser desfeita.</p>
+                            <h3 class="text-2xl font-black text-slate-800 mb-2">Apagar?</h3>
+                            <p class="text-slate-500 text-sm mb-8">Esta ação não pode ser desfeita na nuvem.</p>
                             <div class="flex flex-col gap-3">
-                                <button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-2xl shadow-lg shadow-red-500/20 active:scale-95 transition-transform uppercase text-xs tracking-widest">Sim, Eliminar</button>
-                                <button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-2xl active:scale-95 transition-transform uppercase text-xs tracking-widest">Cancelar</button>
+                                <button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-2xl shadow-lg active:scale-95 transition-transform uppercase text-xs">Sim, Eliminar</button>
+                                <button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-2xl active:scale-95 transition-transform uppercase text-xs">Cancelar</button>
                             </div>
                         </div>
                     </div>
 
                     <!-- MODAL CONFIGURAÇÕES -->
                     <div id="settingsModal" class="${state.showSettingsModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
-                        <div class="bg-white w-full max-w-sm rounded-[3.5rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-                            <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                        <div class="bg-white w-full max-w-sm rounded-[3.5rem] shadow-2xl overflow-hidden">
+                            <div class="p-8 border-b border-slate-100 flex justify-between items-center">
                                 <h3 class="text-xl font-black text-slate-800 flex items-center gap-2"><i data-lucide="lock" class="w-5 h-5 text-blue-600"></i> Segurança</h3>
-                                <button onclick="toggleSettingsModal(false)" class="text-slate-400 hover:text-slate-600"><i data-lucide="x"></i></button>
+                                <button onclick="toggleSettingsModal(false)" class="text-slate-400 hover:text-slate-600 p-2"><i data-lucide="x"></i></button>
                             </div>
                             <form onsubmit="updatePassword(event)" class="p-10 space-y-6">
                                 <div>
-                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Nova Senha do Sistema</label>
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Nova Senha</label>
                                     <input name="newPassword" required type="password" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:border-blue-600/30 font-bold text-center tracking-widest">
                                 </div>
-                                <button type="submit" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-transform tracking-widest uppercase text-xs">Atualizar Senha</button>
+                                <button type="submit" class="w-full bg-slate-900 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-transform uppercase text-xs">Atualizar</button>
                             </form>
                         </div>
                     </div>
