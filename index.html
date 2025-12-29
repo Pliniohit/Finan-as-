@@ -33,11 +33,10 @@
     <input type="file" id="importFile" class="hidden" accept=".json" onchange="handleImport(event)">
 
     <div id="app">
-        <!-- O render() substituirá isso imediatamente -->
+        <!-- Tela de segurança caso o JS demore milissegundos a carregar -->
         <div class="h-screen flex items-center justify-center bg-slate-900 text-white">
             <div class="flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
-                <p class="text-white/40 text-[10px] font-bold uppercase tracking-widest text-center px-6">Iniciando Visões Filmes...</p>
             </div>
         </div>
     </div>
@@ -46,13 +45,6 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // --- Configurações Injetadas pelo Ambiente ---
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-family-app';
 
         // --- Estado Global ---
         let state = {
@@ -72,7 +64,9 @@
             isLoadingData: true
         };
 
-        // --- Definição das Funções (Ordem de Dependência) ---
+        let db, auth, appId;
+
+        // --- Funções de UI Vinculadas ao Window ---
 
         window.showMessage = (text, type = 'info') => {
             const container = document.getElementById('notification-container');
@@ -82,7 +76,7 @@
             toast.className = `${bgColor} text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 fade-in font-bold text-sm border border-white/10`;
             toast.innerHTML = `<i data-lucide="${type === 'error' ? 'alert-circle' : 'info'}"></i> <span>${text}</span>`;
             container.appendChild(toast);
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
             setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 3000);
         };
 
@@ -94,7 +88,8 @@
 
         window.tryLogin = (e) => {
             e.preventDefault();
-            if (e.target.password.value === state.accessPassword) {
+            const passInput = e.target.querySelector('input[type="password"]');
+            if (passInput && passInput.value === state.accessPassword) {
                 state.isAuthorized = true;
                 render();
             } else {
@@ -121,16 +116,22 @@
         };
 
         window.updateModalCategory = (c) => {
-            state.modalData.description = document.getElementsByName('description')[0]?.value || '';
-            state.modalData.amount = document.getElementsByName('amount')[0]?.value || '';
-            state.modalData.date = document.getElementsByName('date')[0]?.value || '';
+            const desc = document.getElementsByName('description')[0];
+            const amnt = document.getElementsByName('amount')[0];
+            const dt = document.getElementsByName('date')[0];
+            state.modalData.description = desc ? desc.value : '';
+            state.modalData.amount = amnt ? amnt.value : '';
+            state.modalData.date = dt ? dt.value : '';
             state.modalCategory = c;
             render();
         };
 
         window.saveTransaction = async (e) => {
             e.preventDefault();
-            if (state.isSaving || !state.user) return;
+            if (state.isSaving || !state.user) {
+                if (!state.user) window.showMessage("A aguardar ligação à nuvem...", "warning");
+                return;
+            }
 
             const form = e.target;
             const raw = form.amount.value.replace(/\./g, '').replace(',', '.');
@@ -157,7 +158,8 @@
                 await addDoc(colRef, payload);
                 state.showModal = false;
                 state.isSaving = false;
-                window.showMessage("Gasto salvo na nuvem!", "success");
+                state.modalData = { description: '', amount: '', date: new Date().toISOString().split('T')[0] };
+                window.showMessage("Gasto guardado!", "success");
                 render();
             } catch (err) {
                 state.isSaving = false;
@@ -190,7 +192,10 @@
             a.click();
         };
 
-        window.triggerImport = () => document.getElementById('importFile').click();
+        window.triggerImport = () => {
+            const input = document.getElementById('importFile');
+            if (input) input.click();
+        };
 
         window.handleImport = (event) => {
             const file = event.target.files[0];
@@ -225,7 +230,7 @@
             });
         }
 
-        // --- Renderização da UI ---
+        // --- Renderização (Função Core) ---
         function render() {
             const appDiv = document.getElementById('app');
             if (!appDiv) return;
@@ -236,11 +241,11 @@
                         <div class="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm text-center border border-white/10">
                             <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-lg"><i data-lucide="lock" class="w-8 h-8"></i></div>
                             <h1 class="text-2xl font-black text-slate-800 mb-2 uppercase tracking-tighter">Visões Filmes</h1>
-                            <p class="text-slate-400 text-sm mb-8 font-medium">Controle Financeiro Online</p>
+                            <p class="text-slate-400 text-sm mb-8 font-medium italic">Gestão Financeira Administrativa</p>
                             <form onsubmit="tryLogin(event)" class="space-y-4">
                                 <input name="password" type="password" required placeholder="Senha de acesso" 
                                     class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-500/10 font-bold text-center tracking-widest transition-all">
-                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Entrar</button>
+                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Aceder ao Painel</button>
                             </form>
                             <div class="mt-8 flex items-center justify-center gap-2">
                                 <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
@@ -249,7 +254,8 @@
                         </div>
                     </div>
                 `;
-                lucide.createIcons(); return;
+                if (window.lucide) lucide.createIcons();
+                return;
             }
 
             const filtered = []; let total = 0; const today = new Date(); today.setHours(0,0,0,0); const reminders = [];
@@ -260,14 +266,14 @@
 
                 if (t.category === 'Fixos') {
                     if (viewDate >= transStart && t.profile === state.activeProfile) {
-                        total += t.amount; filtered.push({ ...t, displayAmount: t.amount, isRecurring: true });
+                        total += (t.amount || 0); filtered.push({ ...t, displayAmount: t.amount, isRecurring: true });
                     }
                 } else {
                     const inst = t.installments || 1;
                     for (let i = 0; i < inst; i++) {
                         const iDate = new Date(Date.UTC(startY, startM + i, 1));
                         if (iDate.getUTCMonth() === state.currentMonth && iDate.getUTCFullYear() === state.currentYear && t.profile === state.activeProfile) {
-                            const v = t.amount / inst; total += v; filtered.push({ ...t, displayAmount: v, currentInstallment: i + 1 });
+                            const v = (t.amount || 0) / inst; total += v; filtered.push({ ...t, displayAmount: v, currentInstallment: i + 1 });
                         }
                     }
                 }
@@ -285,12 +291,12 @@
                     <header class="bg-slate-900 text-white shadow-xl">
                         <div class="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row justify-between items-center gap-4">
                             <div class="flex items-center gap-4">
-                                <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20"><i data-lucide="film" class="w-7 h-7"></i></div>
-                                <div><h1 class="text-xl font-black uppercase tracking-tight">Visões Filmes</h1><p class="text-blue-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Gestão Online</p></div>
+                                <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20"><i data-lucide="film" class="w-7 h-7 text-white"></i></div>
+                                <div><h1 class="text-xl font-black uppercase tracking-tight">Visões Filmes</h1><p class="text-blue-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Gestão Financeira</p></div>
                             </div>
                             <div class="flex items-center gap-3">
-                                <button onclick="triggerImport()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="upload" class="w-5 h-5"></i></button>
-                                <button onclick="exportBackup()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="download" class="w-5 h-5"></i></button>
+                                <button onclick="triggerImport()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="upload" class="w-5 h-5 text-white"></i></button>
+                                <button onclick="exportBackup()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="download" class="w-5 h-5 text-white"></i></button>
                                 <button onclick="location.reload()" class="p-2.5 bg-red-500/10 text-red-400 rounded-xl hover:bg-red-500/20 transition-all"><i data-lucide="log-out" class="w-5 h-5"></i></button>
                             </div>
                         </div>
@@ -303,7 +309,7 @@
 
                     <main class="max-w-5xl mx-auto px-4 mt-8">
                         <div class="flex flex-col sm:flex-row gap-4 mb-8">
-                            <button onclick="toggleModal(true)" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white p-5 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"><i data-lucide="plus"></i> Novo Registro</button>
+                            <button onclick="toggleModal(true)" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white p-5 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"><i data-lucide="plus"></i> Novo Lançamento</button>
                             <div class="flex items-center justify-between bg-white px-6 py-3 rounded-3xl border border-slate-200 shadow-sm sm:w-[320px]">
                                 <button onclick="adjustMonth(-1)" class="p-2 text-slate-400 hover:bg-slate-50 rounded-lg"><i data-lucide="chevron-left"></i></button>
                                 <h2 class="text-sm font-black text-slate-800 uppercase tracking-tighter">${monthName} ${state.currentYear}</h2>
@@ -311,19 +317,19 @@
                             </div>
                         </div>
 
-                        ${state.isLoadingData ? `<div class="py-20 text-center"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>` : `
+                        ${state.isLoadingData && state.user ? `<div class="py-20 text-center"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>` : `
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                             <div class="lg:col-span-2 space-y-8">
-                                <div class="bg-white p-10 rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden relative">
+                                <div class="bg-white p-10 rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden relative group">
                                     <span class="text-[11px] font-black uppercase text-slate-400 tracking-widest">Gasto Previsto (${state.activeProfile})</span>
-                                    <div class="text-5xl font-black mt-2 text-slate-900">${formatBRL(total)}</div>
-                                    <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase"><i data-lucide="cloud-check" class="w-4 h-4"></i> Dados Sincronizados</div>
+                                    <div class="text-5xl font-black mt-2 text-slate-900 tracking-tight">${formatBRL(total)}</div>
+                                    <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase"><i data-lucide="cloud-check" class="w-4 h-4"></i> Sincronizado com a nuvem</div>
                                 </div>
 
                                 <div class="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
                                     <div class="divide-y divide-slate-100">
-                                        ${filtered.length > 0 ? filtered.map(item => `
-                                            <div class="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors group">
+                                        ${filtered.length > 0 ? filtered.map((item, idx) => `
+                                            <div key="${idx}" class="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors group">
                                                 <div class="flex items-center gap-4">
                                                     <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-xl">
                                                         <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.category === 'Financiamento' ? 'landmark' : 'calendar')}" class="w-5 h-5"></i>
@@ -335,7 +341,7 @@
                                                     <button onclick="openDeleteModal('${item.id}')" class="text-slate-200 hover:text-red-500 transition-all p-1 active:scale-90"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
                                                 </div>
                                             </div>
-                                        `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium tracking-widest uppercase text-[10px]">Sem registros</div>'}
+                                        `).join('') : '<div class="p-20 text-center text-slate-300 italic text-[10px] uppercase font-bold tracking-widest tracking-tighter">Sem movimentos</div>'}
                                     </div>
                                 </div>
                             </div>
@@ -344,7 +350,7 @@
                                 <div class="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
                                     <h3 class="font-black text-slate-800 mb-6 flex items-center gap-3 text-xs uppercase text-orange-500 tracking-widest"><i data-lucide="bell"></i> Vencimentos</h3>
                                     <div class="space-y-4">
-                                        ${reminders.length > 0 ? reminders.map(r => `<div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-xl"><p class="text-xs font-black text-slate-700 truncate">${r.description}</p><p class="text-[10px] text-orange-600 font-bold mt-1">${new Date(r.date).toLocaleDateString('pt-BR')}</p></div>`).join('') : '<p class="text-xs text-slate-400 text-center py-4 italic">Contas em dia.</p>'}
+                                        ${reminders.length > 0 ? reminders.map((r, idx) => `<div key="${idx}" class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-xl"><p class="text-xs font-black text-slate-700 truncate">${r.description}</p><p class="text-[10px] text-orange-600 font-bold mt-1">${new Date(r.date).toLocaleDateString('pt-BR')}</p></div>`).join('') : '<p class="text-xs text-slate-400 text-center py-4 italic">Contas em dia.</p>'}
                                     </div>
                                 </div>
                             </div>
@@ -356,7 +362,7 @@
                     <div id="modal" class="${state.showModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
                         <div class="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl overflow-hidden fade-in">
                             <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                <h3 class="text-xl font-black text-slate-800 tracking-tight">Novo Gasto Online</h3>
+                                <h3 class="text-xl font-black text-slate-800 tracking-tight">Novo Lançamento Online</h3>
                                 <button onclick="toggleModal(false)" class="text-slate-400 hover:bg-slate-100 p-2 rounded-xl"><i data-lucide="x"></i></button>
                             </div>
                             <form onsubmit="saveTransaction(event)" class="p-8 space-y-6">
@@ -397,42 +403,49 @@
                         <div class="bg-white w-full max-w-xs rounded-[3rem] p-10 text-center shadow-2xl border border-red-50">
                             <div class="bg-red-50 w-16 h-16 rounded-2xl flex items-center justify-center text-red-500 mx-auto mb-6"><i data-lucide="trash-2" class="w-8 h-8"></i></div>
                             <h3 class="text-xl font-black text-slate-800 mb-2 tracking-tight">Apagar?</h3>
-                            <p class="text-xs text-slate-400 font-medium mb-8 uppercase tracking-widest">Remover do servidor</p>
+                            <p class="text-xs text-slate-400 font-medium mb-8 uppercase tracking-widest">Remover da nuvem definitivamente</p>
                             <div class="flex flex-col gap-3"><button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-xl shadow-lg active:scale-95 transition-all uppercase text-xs tracking-widest">Sim, Eliminar</button><button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Cancelar</button></div>
                         </div>
                     </div>
                 </div>
             `;
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
         }
 
-        // --- ARRANQUE DO SISTEMA (Resiliente e Sem Espera) ---
+        // --- ARRANQUE DO SISTEMA ---
         async function startApp() {
-            // REGRA: Mostrar UI de login imediatamente
+            // REGRA: Mostrar UI de login IMEDIATAMENTE
             render(); 
 
             try {
-                // Ponte de Segurança em background
-                const initAuth = async () => {
+                // Tenta extrair config de forma segura
+                const rawConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+                const firebaseConfig = JSON.parse(rawConfig);
+                
+                if (firebaseConfig.apiKey) {
+                    const app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+                    appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-family-app';
+
+                    onAuthStateChanged(auth, (user) => {
+                        state.user = user;
+                        if (user) {
+                            subscribeToData();
+                        }
+                        render();
+                    });
+
+                    // Autenticação Silenciosa (Regra 3)
                     if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                         await signInWithCustomToken(auth, __initial_auth_token);
                     } else {
                         await signInAnonymously(auth);
                     }
-                };
-
-                onAuthStateChanged(auth, (user) => {
-                    state.user = user;
-                    if (user) {
-                        subscribeToData();
-                    }
-                    render(); // Atualiza a bolinha de status online
-                });
-
-                await initAuth();
-                
+                }
             } catch (err) {
-                console.error("Erro silencioso de conexão:", err);
+                console.warn("Ambiente limitado:", err);
+                // Mesmo com erro, a UI já está renderizada pelo comando inicial
             }
         }
 
