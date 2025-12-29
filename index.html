@@ -30,23 +30,29 @@
 <body class="bg-[#F8FAFC] text-slate-900 pb-20">
 
     <div id="notification-container"></div>
-    <input type="file" id="importFile" class="hidden" accept=".json" onchange="handleImport(event)">
+    <input type="file" id="importFile" class="hidden" accept=".json">
 
     <div id="app">
-        <!-- Tela de segurança caso o JS demore milissegundos a carregar -->
         <div class="h-screen flex items-center justify-center bg-slate-900 text-white">
             <div class="flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
+                <p class="text-white/40 text-[10px] font-bold uppercase tracking-widest text-center px-6">Sincronizando Visões Filmes...</p>
             </div>
         </div>
     </div>
 
+    <!-- Firebase SDKs -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
 
-        // --- Estado Global ---
+        // --- Variáveis de Ambiente ---
+        const configStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+        const firebaseConfig = JSON.parse(configStr);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-family-app';
+
+        // --- Estado do App ---
         let state = {
             isAuthorized: false,
             user: null,
@@ -64,9 +70,45 @@
             isLoadingData: true
         };
 
-        let db, auth, appId;
+        let db, auth;
 
-        // --- Funções de UI Vinculadas ao Window ---
+        // --- Inicialização do Banco de Dados ---
+        function initFirebase() {
+            if (!firebaseConfig.apiKey) return;
+            const app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+
+            // Regra 3: Autenticação obrigatória antes de qualquer query
+            onAuthStateChanged(auth, (user) => {
+                state.user = user;
+                if (user) subscribeToData();
+                render();
+            });
+
+            const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            if (token) {
+                signInWithCustomToken(auth, token).catch(() => signInAnonymously(auth));
+            } else {
+                signInAnonymously(auth);
+            }
+        }
+
+        function subscribeToData() {
+            // Regra 1: Caminho estrito de dados públicos
+            const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+            onSnapshot(colRef, (snapshot) => {
+                state.transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                state.isLoadingData = false;
+                render();
+            }, (err) => {
+                console.error("Erro ao ler nuvem:", err);
+                state.isLoadingData = false;
+                render();
+            });
+        }
+
+        // --- Funções de UI (Expostas ao Window para os cliques funcionarem) ---
 
         window.showMessage = (text, type = 'info') => {
             const container = document.getElementById('notification-container');
@@ -80,16 +122,10 @@
             setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 3000);
         };
 
-        window.maskCurrency = (i) => {
-            let v = i.value.replace(/\D/g, "");
-            if (!v) { i.value = ""; return; }
-            i.value = (parseInt(v) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
-        };
-
         window.tryLogin = (e) => {
             e.preventDefault();
-            const passInput = e.target.querySelector('input[type="password"]');
-            if (passInput && passInput.value === state.accessPassword) {
+            const pass = e.target.password.value;
+            if (pass === state.accessPassword) {
                 state.isAuthorized = true;
                 render();
             } else {
@@ -97,46 +133,17 @@
             }
         };
 
-        window.setActiveProfile = (p) => { state.activeProfile = p; render(); };
-        
-        window.adjustMonth = (o) => {
-            state.currentMonth += o;
-            if (state.currentMonth < 0) { state.currentMonth = 11; state.currentYear--; }
-            else if (state.currentMonth > 11) { state.currentMonth = 0; state.currentYear++; }
-            render();
-        };
-
-        window.toggleModal = (s) => { 
-            state.showModal = s; 
-            if(s) {
-                state.modalCategory = 'Gasto Mensal';
-                state.modalData = { description: '', amount: '', date: new Date().toISOString().split('T')[0] };
-            }
-            render(); 
-        };
-
-        window.updateModalCategory = (c) => {
-            const desc = document.getElementsByName('description')[0];
-            const amnt = document.getElementsByName('amount')[0];
-            const dt = document.getElementsByName('date')[0];
-            state.modalData.description = desc ? desc.value : '';
-            state.modalData.amount = amnt ? amnt.value : '';
-            state.modalData.date = dt ? dt.value : '';
-            state.modalCategory = c;
-            render();
-        };
-
         window.saveTransaction = async (e) => {
             e.preventDefault();
-            if (state.isSaving || !state.user) {
-                if (!state.user) window.showMessage("A aguardar ligação à nuvem...", "warning");
+            if (state.isSaving) return;
+
+            if (!state.user) {
+                window.showMessage("Erro: Sem conexão com o servidor. Tente em instantes.", "error");
                 return;
             }
 
             const form = e.target;
-            const raw = form.amount.value.replace(/\./g, '').replace(',', '.');
-            const amount = parseFloat(raw);
-
+            const amount = parseFloat(form.amount.value.replace(/\./g, '').replace(',', '.'));
             if (!amount || amount <= 0) { window.showMessage("Valor inválido", "error"); return; }
 
             state.isSaving = true;
@@ -158,18 +165,14 @@
                 await addDoc(colRef, payload);
                 state.showModal = false;
                 state.isSaving = false;
-                state.modalData = { description: '', amount: '', date: new Date().toISOString().split('T')[0] };
-                window.showMessage("Gasto guardado!", "success");
+                window.showMessage("Sincronizado com a nuvem!", "success");
                 render();
             } catch (err) {
                 state.isSaving = false;
                 render();
-                window.showMessage("Erro ao salvar.", "error");
+                window.showMessage("Erro ao salvar online.", "error");
             }
         };
-
-        window.openDeleteModal = (id) => { state.deleteId = id; render(); };
-        window.closeDeleteModal = () => { state.deleteId = null; render(); };
 
         window.confirmDelete = async () => {
             if (!state.deleteId || !state.user) return;
@@ -178,86 +181,101 @@
                 await deleteDoc(docRef);
                 state.deleteId = null;
                 render();
-                window.showMessage("Removido", "success");
+                window.showMessage("Registro removido", "success");
             } catch (e) { window.showMessage("Erro ao apagar", "error"); }
         };
+
+        window.maskCurrency = (i) => {
+            let v = i.value.replace(/\D/g, "");
+            if (!v) { i.value = ""; return; }
+            i.value = (parseInt(v) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+        };
+
+        window.setActiveProfile = (p) => { state.activeProfile = p; render(); };
+        window.adjustMonth = (o) => {
+            state.currentMonth += o;
+            if (state.currentMonth < 0) { state.currentMonth = 11; state.currentYear--; }
+            else if (state.currentMonth > 11) { state.currentMonth = 0; state.currentYear++; }
+            render();
+        };
+        window.toggleModal = (s) => { 
+            state.showModal = s; 
+            if(s) {
+                state.modalCategory = 'Gasto Mensal';
+                state.modalData = { description: '', amount: '', date: new Date().toISOString().split('T')[0] };
+            }
+            render(); 
+        };
+        window.updateModalCategory = (c) => {
+            state.modalData.description = document.getElementsByName('description')[0]?.value || '';
+            state.modalData.amount = document.getElementsByName('amount')[0]?.value || '';
+            state.modalData.date = document.getElementsByName('date')[0]?.value || '';
+            state.modalCategory = c;
+            render();
+        };
+        window.openDeleteModal = (id) => { state.deleteId = id; render(); };
+        window.closeDeleteModal = () => { state.deleteId = null; render(); };
 
         window.exportBackup = () => {
             const data = JSON.stringify(state.transactions, null, 2);
             const blob = new Blob([data], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
+            a.href = URL.createObjectURL(blob);
             a.download = `backup_visoes_${new Date().toISOString().split('T')[0]}.json`;
             a.click();
         };
 
-        window.triggerImport = () => {
-            const input = document.getElementById('importFile');
-            if (input) input.click();
-        };
+        window.triggerImport = () => document.getElementById('importFile').click();
 
-        window.handleImport = (event) => {
+        document.getElementById('importFile').onchange = (event) => {
             const file = event.target.files[0];
             if (!file || !state.user) return;
             const reader = new FileReader();
             reader.onload = async (e) => {
                 try {
-                    const importedData = JSON.parse(e.target.result);
-                    if (Array.isArray(importedData)) {
+                    const imported = JSON.parse(e.target.result);
+                    if (Array.isArray(imported)) {
                         const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-                        for (const item of importedData) {
+                        for (const item of imported) {
                             delete item.id;
                             await addDoc(colRef, { ...item, userId: state.user.uid });
                         }
-                        window.showMessage("Backup importado!", "success");
+                        window.showMessage("Backup restaurado na nuvem!", "success");
                     }
                 } catch (err) { window.showMessage("Erro no arquivo", "error"); }
             };
             reader.readAsText(file);
         };
 
-        function subscribeToData() {
-            if (!state.user || !db) return;
-            const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-            onSnapshot(colRef, (snapshot) => {
-                state.transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                state.isLoadingData = false;
-                render();
-            }, (error) => {
-                state.isLoadingData = false;
-                render();
-            });
-        }
-
-        // --- Renderização (Função Core) ---
+        // --- Motor de Renderização ---
         function render() {
             const appDiv = document.getElementById('app');
             if (!appDiv) return;
 
+            // TELA DE LOGIN
             if (!state.isAuthorized) {
                 appDiv.innerHTML = `
                     <div class="h-screen login-screen flex flex-col items-center justify-center px-4 fade-in">
                         <div class="bg-white p-10 rounded-[3rem] shadow-2xl w-full max-w-sm text-center border border-white/10">
                             <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-lg"><i data-lucide="lock" class="w-8 h-8"></i></div>
                             <h1 class="text-2xl font-black text-slate-800 mb-2 uppercase tracking-tighter">Visões Filmes</h1>
-                            <p class="text-slate-400 text-sm mb-8 font-medium italic">Gestão Financeira Administrativa</p>
+                            <p class="text-slate-400 text-sm mb-8 font-medium">Acesso Online Sincronizado</p>
                             <form onsubmit="tryLogin(event)" class="space-y-4">
                                 <input name="password" type="password" required placeholder="Senha de acesso" 
                                     class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none focus:ring-4 focus:ring-blue-500/10 font-bold text-center tracking-widest transition-all">
-                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Aceder ao Painel</button>
+                                <button type="submit" class="w-full bg-blue-600 text-white font-black py-4 rounded-2xl shadow-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Entrar</button>
                             </form>
                             <div class="mt-8 flex items-center justify-center gap-2">
                                 <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
-                                <p class="text-[9px] text-slate-400 font-bold uppercase tracking-widest">${state.user ? 'Servidor Pronto' : 'Conectando...'}</p>
+                                <p class="text-[9px] text-slate-400 font-bold uppercase tracking-widest">${state.user ? 'Nuvem Pronta' : 'A ligar...'}</p>
                             </div>
                         </div>
                     </div>
                 `;
-                if (window.lucide) lucide.createIcons();
-                return;
+                lucide.createIcons(); return;
             }
 
+            // Cálculos Financeiros
             const filtered = []; let total = 0; const today = new Date(); today.setHours(0,0,0,0); const reminders = [];
             state.transactions.forEach(t => {
                 const tDate = new Date(t.date); const startM = tDate.getUTCMonth(); const startY = tDate.getUTCFullYear();
@@ -286,17 +304,18 @@
             const formatBRL = (v) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
             const monthName = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][state.currentMonth];
 
+            // TELA PRINCIPAL
             appDiv.innerHTML = `
                 <div class="fade-in">
                     <header class="bg-slate-900 text-white shadow-xl">
                         <div class="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row justify-between items-center gap-4">
                             <div class="flex items-center gap-4">
-                                <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20"><i data-lucide="film" class="w-7 h-7 text-white"></i></div>
-                                <div><h1 class="text-xl font-black uppercase tracking-tight">Visões Filmes</h1><p class="text-blue-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Gestão Financeira</p></div>
+                                <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20"><i data-lucide="film" class="w-7 h-7"></i></div>
+                                <div><h1 class="text-xl font-black uppercase tracking-tight">Visões Filmes</h1><p class="text-blue-400 text-[10px] font-bold uppercase tracking-widest mt-0.5">Gestão de Produção</p></div>
                             </div>
                             <div class="flex items-center gap-3">
-                                <button onclick="triggerImport()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="upload" class="w-5 h-5 text-white"></i></button>
-                                <button onclick="exportBackup()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="download" class="w-5 h-5 text-white"></i></button>
+                                <button onclick="triggerImport()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="upload" class="w-5 h-5"></i></button>
+                                <button onclick="exportBackup()" class="p-2.5 bg-white/10 rounded-xl hover:bg-white/20 transition-all"><i data-lucide="download" class="w-5 h-5"></i></button>
                                 <button onclick="location.reload()" class="p-2.5 bg-red-500/10 text-red-400 rounded-xl hover:bg-red-500/20 transition-all"><i data-lucide="log-out" class="w-5 h-5"></i></button>
                             </div>
                         </div>
@@ -309,7 +328,7 @@
 
                     <main class="max-w-5xl mx-auto px-4 mt-8">
                         <div class="flex flex-col sm:flex-row gap-4 mb-8">
-                            <button onclick="toggleModal(true)" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white p-5 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"><i data-lucide="plus"></i> Novo Lançamento</button>
+                            <button onclick="toggleModal(true)" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white p-5 rounded-3xl font-black flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95"><i data-lucide="plus"></i> Novo Registro Online</button>
                             <div class="flex items-center justify-between bg-white px-6 py-3 rounded-3xl border border-slate-200 shadow-sm sm:w-[320px]">
                                 <button onclick="adjustMonth(-1)" class="p-2 text-slate-400 hover:bg-slate-50 rounded-lg"><i data-lucide="chevron-left"></i></button>
                                 <h2 class="text-sm font-black text-slate-800 uppercase tracking-tighter">${monthName} ${state.currentYear}</h2>
@@ -317,31 +336,31 @@
                             </div>
                         </div>
 
-                        ${state.isLoadingData && state.user ? `<div class="py-20 text-center"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>` : `
+                        ${state.isLoadingData ? `<div class="py-20 text-center"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>` : `
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                             <div class="lg:col-span-2 space-y-8">
                                 <div class="bg-white p-10 rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden relative group">
-                                    <span class="text-[11px] font-black uppercase text-slate-400 tracking-widest">Gasto Previsto (${state.activeProfile})</span>
+                                    <span class="text-[11px] font-black uppercase text-slate-400 tracking-widest">Total do Mês (${state.activeProfile})</span>
                                     <div class="text-5xl font-black mt-2 text-slate-900 tracking-tight">${formatBRL(total)}</div>
-                                    <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase"><i data-lucide="cloud-check" class="w-4 h-4"></i> Sincronizado com a nuvem</div>
+                                    <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase"><i data-lucide="cloud-check" class="w-4 h-4"></i> Servidor Ativo</div>
                                 </div>
 
                                 <div class="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
                                     <div class="divide-y divide-slate-100">
                                         ${filtered.length > 0 ? filtered.map((item, idx) => `
-                                            <div key="${idx}" class="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors group">
+                                            <div key="${item.id}-${idx}" class="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors group">
                                                 <div class="flex items-center gap-4">
                                                     <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-xl">
                                                         <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.category === 'Financiamento' ? 'landmark' : 'calendar')}" class="w-5 h-5"></i>
                                                     </div>
-                                                    <div><h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4><p class="text-[10px] text-slate-400 font-bold uppercase">${item.isRecurring ? 'Mensal Fixo' : `Parc. ${item.currentInstallment}/${item.installments}`}</p></div>
+                                                    <div><h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4><p class="text-[10px] text-slate-400 font-bold uppercase">${item.isRecurring ? 'Fixo Mensal' : `Parc. ${item.currentInstallment}/${item.installments}`}</p></div>
                                                 </div>
                                                 <div class="flex items-center gap-4">
                                                     <span class="font-black text-slate-900 text-sm">${formatBRL(item.displayAmount)}</span>
                                                     <button onclick="openDeleteModal('${item.id}')" class="text-slate-200 hover:text-red-500 transition-all p-1 active:scale-90"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
                                                 </div>
                                             </div>
-                                        `).join('') : '<div class="p-20 text-center text-slate-300 italic text-[10px] uppercase font-bold tracking-widest tracking-tighter">Sem movimentos</div>'}
+                                        `).join('') : '<div class="p-20 text-center text-slate-300 italic text-[10px] uppercase font-bold tracking-widest">Sem movimentos</div>'}
                                     </div>
                                 </div>
                             </div>
@@ -362,7 +381,7 @@
                     <div id="modal" class="${state.showModal ? 'fixed' : 'hidden'} inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm">
                         <div class="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl overflow-hidden fade-in">
                             <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                <h3 class="text-xl font-black text-slate-800 tracking-tight">Novo Lançamento Online</h3>
+                                <h3 class="text-xl font-black text-slate-800 tracking-tight">Novo Gasto Online</h3>
                                 <button onclick="toggleModal(false)" class="text-slate-400 hover:bg-slate-100 p-2 rounded-xl"><i data-lucide="x"></i></button>
                             </div>
                             <form onsubmit="saveTransaction(event)" class="p-8 space-y-6">
@@ -403,7 +422,7 @@
                         <div class="bg-white w-full max-w-xs rounded-[3rem] p-10 text-center shadow-2xl border border-red-50">
                             <div class="bg-red-50 w-16 h-16 rounded-2xl flex items-center justify-center text-red-500 mx-auto mb-6"><i data-lucide="trash-2" class="w-8 h-8"></i></div>
                             <h3 class="text-xl font-black text-slate-800 mb-2 tracking-tight">Apagar?</h3>
-                            <p class="text-xs text-slate-400 font-medium mb-8 uppercase tracking-widest">Remover da nuvem definitivamente</p>
+                            <p class="text-xs text-slate-400 font-medium mb-8 uppercase tracking-widest">Remover do servidor</p>
                             <div class="flex flex-col gap-3"><button onclick="confirmDelete()" class="w-full bg-red-500 text-white font-black py-4 rounded-xl shadow-lg active:scale-95 transition-all uppercase text-xs tracking-widest">Sim, Eliminar</button><button onclick="closeDeleteModal()" class="w-full bg-slate-100 text-slate-500 font-black py-4 rounded-xl active:scale-95 transition-all uppercase text-xs tracking-widest">Cancelar</button></div>
                         </div>
                     </div>
@@ -412,45 +431,10 @@
             if (window.lucide) lucide.createIcons();
         }
 
-        // --- ARRANQUE DO SISTEMA ---
-        async function startApp() {
-            // REGRA: Mostrar UI de login IMEDIATAMENTE
-            render(); 
+        // --- ARRANQUE ---
+        render(); // Render imediato para mostrar a tela de login sem esperar
+        initFirebase();
 
-            try {
-                // Tenta extrair config de forma segura
-                const rawConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
-                const firebaseConfig = JSON.parse(rawConfig);
-                
-                if (firebaseConfig.apiKey) {
-                    const app = initializeApp(firebaseConfig);
-                    auth = getAuth(app);
-                    db = getFirestore(app);
-                    appId = typeof __app_id !== 'undefined' ? __app_id : 'finance-family-app';
-
-                    onAuthStateChanged(auth, (user) => {
-                        state.user = user;
-                        if (user) {
-                            subscribeToData();
-                        }
-                        render();
-                    });
-
-                    // Autenticação Silenciosa (Regra 3)
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                }
-            } catch (err) {
-                console.warn("Ambiente limitado:", err);
-                // Mesmo com erro, a UI já está renderizada pelo comando inicial
-            }
-        }
-
-        // Iniciar
-        startApp();
     </script>
 </body>
 </html>
