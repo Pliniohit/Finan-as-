@@ -33,7 +33,7 @@
     <div id="notification-container"></div>
 
     <div id="app">
-        <!-- O Spinner agora é apenas temporário até o JS carregar a UI de Login -->
+        <!-- Carregamento inicial ultrarrápido -->
         <div class="h-screen flex items-center justify-center bg-slate-900 text-white">
             <div class="flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
@@ -45,7 +45,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, setDoc, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
 
         // --- Estado do Sistema ---
         let state = {
@@ -63,23 +63,23 @@
             isSaving: false,
             deleteId: null,
             modalCategory: 'Gasto Mensal',
-            connectionStatus: 'connecting'
+            isOffline: !navigator.onLine
         };
 
         let auth, db, appId;
 
-        // --- Inicialização Reforçada ---
+        // Monitorar conexão de rede do navegador
+        window.addEventListener('online', () => { state.isOffline = false; render(); showMessage("Conexão restabelecida!", "success"); });
+        window.addEventListener('offline', () => { state.isOffline = true; render(); showMessage("Modo Offline Ativado", "info"); });
+
+        // --- Inicialização com Banco de Dados Interno (Cache) ---
         async function startApp() {
-            // Chamamos render imediatamente para mostrar a tela de login, sem esperar pelo Firebase
+            // Renderiza a tela de login imediatamente para não travar em círculos de carregamento
             render();
 
             try {
                 const configStr = window.__firebase_config;
-                if (!configStr) {
-                    state.connectionStatus = 'error';
-                    render();
-                    return;
-                }
+                if (!configStr) return;
 
                 const firebaseConfig = JSON.parse(configStr);
                 const app = initializeApp(firebaseConfig);
@@ -87,15 +87,22 @@
                 db = getFirestore(app);
                 appId = window.__app_id || 'finance-family-app';
 
+                // ATIVAÇÃO DO BANCO DE DADOS INTERNO (Offline Persistence)
+                try {
+                    await enableIndexedDbPersistence(db);
+                } catch (err) {
+                    if (err.code == 'failed-precondition') {
+                        console.warn("Persistência falhou: Múltiplas abas abertas.");
+                    } else if (err.code == 'unimplemented') {
+                        console.warn("Persistência não suportada pelo navegador.");
+                    }
+                }
+
                 onAuthStateChanged(auth, (user) => {
+                    state.user = user;
                     if (user) {
-                        state.user = user;
-                        state.connectionStatus = 'connected';
                         subscribeToData();
                         subscribeToSettings();
-                    } else {
-                        state.user = null;
-                        state.connectionStatus = 'connecting';
                     }
                     render();
                 });
@@ -108,8 +115,7 @@
                 }
 
             } catch (e) {
-                console.error("Firebase init failed:", e);
-                state.connectionStatus = 'error';
+                console.error("Erro na carga inicial:", e);
                 render();
             }
         }
@@ -136,6 +142,7 @@
 
         // --- Sincronização ---
         function subscribeToSettings() {
+            if (!state.user) return;
             const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'app_settings', 'auth');
             onSnapshot(settingsDoc, (snapshot) => {
                 if (snapshot.exists()) {
@@ -148,13 +155,14 @@
         }
 
         function subscribeToData() {
+            if (!state.user) return;
             const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
             onSnapshot(colRef, (snapshot) => {
                 state.transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 state.isLoadingData = false;
                 render();
             }, (error) => {
-                console.error("Firestore data error:", error);
+                console.warn("Erro ao buscar dados (pode estar offline):", error);
                 state.isLoadingData = false;
                 render();
             });
@@ -204,25 +212,15 @@
         window.openDeleteModal = (id) => { state.deleteId = id; render(); };
         window.closeDeleteModal = () => { state.deleteId = null; render(); };
 
-        // --- SALVAMENTO DEFINITIVO ---
+        // --- SALVAMENTO (Funciona mesmo offline, sincroniza depois) ---
         window.saveTransaction = async (event) => {
             event.preventDefault();
-            
             if (state.isSaving) return;
             
-            // Verificação de segurança: Regra 3
-            if (!state.user || !auth.currentUser) {
-                showMessage("Ainda a ligar à nuvem... Aguarde 2 segundos.", "warning");
-                return;
-            }
-
             const form = event.target;
             const amount = parseFloat(form.amount.value.replace(/\./g, '').replace(',', '.'));
             
-            if (!amount || amount <= 0) {
-                showMessage("Insira um valor válido.", "error");
-                return;
-            }
+            if (!amount || amount <= 0) { showMessage("Insira um valor válido.", "error"); return; }
 
             state.isSaving = true;
             render();
@@ -236,23 +234,22 @@
                 category: cat,
                 installments: cat === 'Fixos' ? 1 : parseInt(form.installments.value),
                 createdAt: new Date().toISOString(),
-                userId: auth.currentUser.uid
+                userId: state.user ? state.user.uid : 'offline-user'
             };
 
             try {
-                // Regra 1: Caminho estrito de dados públicos
+                // Se estiver sem user mas a app estiver iniciada, o Firestore guardará localmente
                 const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
                 await addDoc(colRef, payload);
                 
                 state.showModal = false;
                 state.isSaving = false;
-                showMessage("Gasto guardado com sucesso!", "success");
+                showMessage("Salvo internamente! Sincronizará com a nuvem em breve.", "success");
                 render();
             } catch (err) {
-                console.error("Save error:", err);
                 state.isSaving = false;
                 render();
-                showMessage("Erro ao salvar: " + err.message, "error");
+                showMessage("Erro ao salvar dados.", "error");
             }
         };
 
@@ -271,9 +268,8 @@
             const rows = state.transactions.map(t => [t.date, `"${t.description}"`, t.profile, t.category, t.amount.toFixed(2), t.installments]);
             const content = "\ufeff" + [headers, ...rows].map(e => e.join(",")).join("\n");
             const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
+            a.href = URL.createObjectURL(blob);
             a.download = `financeiro_visoes_filmes.csv`;
             a.click();
         };
@@ -292,7 +288,7 @@
                                 <i data-lucide="lock" class="w-10 h-10"></i>
                             </div>
                             <h1 class="text-3xl font-black text-slate-800 mb-2 tracking-tight">Visões Filmes</h1>
-                            <p class="text-slate-400 text-sm mb-10 font-medium italic">Acesso Restrito</p>
+                            <p class="text-slate-400 text-sm mb-10 font-medium italic">Gestão Financeira</p>
                             <form onsubmit="tryLogin(event)" class="space-y-4 text-slate-800">
                                 <input name="password" type="password" required placeholder="Senha de Acesso" 
                                     class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-5 outline-none focus:ring-4 focus:ring-blue-600/10 font-bold text-center tracking-widest transition-all">
@@ -301,9 +297,9 @@
                                 </button>
                             </form>
                             <div class="mt-10 flex items-center justify-center gap-2">
-                                <div class="w-2 h-2 rounded-full ${state.user ? 'bg-green-500' : 'bg-orange-500 animate-pulse'}"></div>
-                                <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest">
-                                    ${state.user ? 'Nuvem Conectada' : 'A validar ligação...'}
+                                <div class="w-2 h-2 rounded-full ${state.isOffline ? 'bg-orange-500' : (state.user ? 'bg-green-500' : 'bg-blue-500 animate-pulse')}"></div>
+                                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                                    ${state.isOffline ? 'Modo Offline Ativo' : (state.user ? 'Nuvem Conectada' : 'A validar ligação...')}
                                 </p>
                             </div>
                         </div>
@@ -313,7 +309,7 @@
                 return;
             }
 
-            // CÁLCULOS DE EXTRATO
+            // CÁLCULOS
             const filteredItems = [];
             let monthlyTotal = 0;
             const today = new Date(); today.setHours(0,0,0,0);
@@ -322,9 +318,9 @@
             state.transactions.forEach(t => {
                 const tDate = new Date(t.date);
                 const startM = tDate.getUTCMonth();
-                const startY = tDate.getUTCFullYear();
+                const startYear = tDate.getUTCFullYear();
                 const viewDate = new Date(Date.UTC(state.currentYear, state.currentMonth, 1));
-                const transStart = new Date(Date.UTC(startY, startM, 1));
+                const transStart = new Date(Date.UTC(startYear, startM, 1));
 
                 if (t.category === 'Fixos') {
                     if (viewDate >= transStart && t.profile === state.activeProfile) {
@@ -360,9 +356,10 @@
                                 <div class="bg-blue-600 p-3 rounded-2xl shadow-lg shadow-blue-500/20"><i data-lucide="film" class="w-7 h-7 text-white"></i></div>
                                 <div><h1 class="text-2xl font-black uppercase tracking-tight">Visões Filmes</h1><p class="text-blue-400 text-[10px] font-bold uppercase tracking-widest mt-1">Plinio & Lilian</p></div>
                             </div>
-                            <div class="flex items-center gap-3">
-                                <button onclick="exportCSV()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Baixar CSV"><i data-lucide="download" class="w-5 h-5 text-white"></i></button>
-                                <button onclick="toggleSettingsModal(true)" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all" title="Senha"><i data-lucide="settings" class="w-5 h-5 text-white"></i></button>
+                            <div class="flex items-center gap-3 text-slate-300">
+                                ${state.isOffline ? '<span class="bg-orange-500/20 text-orange-400 px-3 py-1 rounded-full text-[9px] font-black uppercase border border-orange-400/20">Offline</span>' : ''}
+                                <button onclick="exportCSV()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all"><i data-lucide="download" class="w-5 h-5 text-white"></i></button>
+                                <button onclick="toggleSettingsModal(true)" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-all"><i data-lucide="settings" class="w-5 h-5 text-white"></i></button>
                                 <div class="px-3 py-1.5 bg-green-500/20 text-green-400 rounded-xl text-[10px] font-black uppercase flex items-center gap-2">
                                     <i data-lucide="shield-check" class="w-3 h-3"></i> Protegido
                                 </div>
@@ -384,52 +381,53 @@
                             <button onclick="adjustMonth(1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-400"><i data-lucide="chevron-right"></i></button>
                         </div>
 
-                        ${state.isLoadingData ? `<div class="py-20 text-center"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div></div>` : `
-                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                                <div class="lg:col-span-2 space-y-8">
-                                    <div class="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm relative overflow-hidden group">
-                                        <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Mensal (${state.activeProfile})</span>
-                                        <div class="text-5xl font-black mt-4 flex items-baseline gap-2 text-slate-900 tracking-tight">${formatBRL(monthlyTotal)}</div>
-                                        <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase"><i data-lucide="check-circle" class="w-4 h-4"></i> Dados Atuais</div>
-                                    </div>
-
-                                    <div class="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden mb-10">
-                                        <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                                            <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos</h3>
-                                            <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">${filteredItems.length} itens</span>
-                                        </div>
-                                        <div class="divide-y divide-slate-100">
-                                            ${filteredItems.length > 0 ? filteredItems.map(item => `
-                                                <div class="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors group">
-                                                    <div class="flex items-center gap-4">
-                                                        <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-2xl">
-                                                            <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.installments > 1 ? 'credit-card' : 'calendar')}" class="w-5 h-5"></i>
-                                                        </div>
-                                                        <div>
-                                                            <h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4>
-                                                            <p class="text-[10px] text-slate-400 font-bold uppercase">${item.isRecurring ? 'Mensal' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}</p>
-                                                        </div>
-                                                    </div>
-                                                    <div class="flex items-center gap-4">
-                                                        <span class="font-black text-slate-900 text-sm">${formatBRL(item.displayAmount)}</span>
-                                                        <button onclick="openDeleteModal('${item.id}')" class="text-slate-200 hover:text-red-500 transition-all p-1 active:scale-90"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
-                                                    </div>
-                                                </div>
-                                            `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum registro encontrado.</div>'}
-                                        </div>
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                            <div class="lg:col-span-2 space-y-8">
+                                <div class="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm relative overflow-hidden group">
+                                    <span class="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400">Total Mensal (${state.activeProfile})</span>
+                                    <div class="text-5xl font-black mt-4 flex items-baseline gap-2 text-slate-900 tracking-tight">${formatBRL(monthlyTotal)}</div>
+                                    <div class="mt-8 flex items-center gap-2 text-green-600 font-bold text-[10px] uppercase">
+                                        <i data-lucide="${state.isOffline ? 'clock' : 'check-circle'}" class="w-4 h-4"></i> 
+                                        ${state.isOffline ? 'Dados Internos (Pendente Sincronização)' : 'Dados Atuais'}
                                     </div>
                                 </div>
 
-                                <div class="space-y-8">
-                                    <div class="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
-                                        <h3 class="font-black text-slate-800 mb-6 flex items-center gap-3 text-xs uppercase tracking-widest text-orange-500"><i data-lucide="bell"></i> Próximos Pagamentos</h3>
-                                        <div class="space-y-4">
-                                            ${reminders.length > 0 ? reminders.map(r => `<div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-2xl transition-all hover:bg-orange-50"><p class="text-xs font-black text-slate-700 truncate">${r.description}</p><p class="text-[10px] text-orange-600 font-bold mt-1">${new Date(r.date).toLocaleDateString('pt-BR')}</p></div>`).join('') : '<p class="text-xs text-slate-400 italic text-center py-6">Tudo em dia.</p>'}
-                                        </div>
+                                <div class="bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden mb-10">
+                                    <div class="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                                        <h3 class="font-extrabold text-slate-800 uppercase tracking-tight">Lançamentos</h3>
+                                        <span class="bg-slate-200/50 text-slate-600 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">${filteredItems.length} itens</span>
+                                    </div>
+                                    <div class="divide-y divide-slate-100">
+                                        ${filteredItems.length > 0 ? filteredItems.map(item => `
+                                            <div class="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors group">
+                                                <div class="flex items-center gap-4">
+                                                    <div class="p-3 ${item.isRecurring ? 'bg-purple-50 text-purple-600' : (item.category === 'Financiamento' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600')} rounded-2xl">
+                                                        <i data-lucide="${item.isRecurring ? 'refresh-cw' : (item.installments > 1 ? 'credit-card' : 'calendar')}" class="w-5 h-5"></i>
+                                                    </div>
+                                                    <div>
+                                                        <h4 class="font-bold text-slate-800 text-sm tracking-tight">${item.description}</h4>
+                                                        <p class="text-[10px] text-slate-400 font-bold uppercase">${item.isRecurring ? 'Mensal' : (item.installments > 1 ? `Parc. ${item.currentInstallment}/${item.installments}` : 'Único')}</p>
+                                                    </div>
+                                                </div>
+                                                <div class="flex items-center gap-4">
+                                                    <span class="font-black text-slate-900 text-sm">${formatBRL(item.displayAmount)}</span>
+                                                    <button onclick="openDeleteModal('${item.id}')" class="text-slate-200 hover:text-red-500 transition-all p-1 active:scale-90"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                                </div>
+                                            </div>
+                                        `).join('') : '<div class="p-20 text-center text-slate-300 italic font-medium">Nenhum registro encontrado.</div>'}
                                     </div>
                                 </div>
                             </div>
-                        `}
+
+                            <div class="space-y-8">
+                                <div class="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                                    <h3 class="font-black text-slate-800 mb-6 flex items-center gap-3 text-xs uppercase tracking-widest text-orange-500"><i data-lucide="bell"></i> Próximos Pagamentos</h3>
+                                    <div class="space-y-4">
+                                        ${reminders.length > 0 ? reminders.map(r => `<div class="p-4 bg-orange-50/50 border-l-4 border-orange-400 rounded-r-2xl transition-all hover:bg-orange-50"><p class="text-xs font-black text-slate-700 truncate">${r.description}</p><p class="text-[10px] text-orange-600 font-bold mt-1">${new Date(r.date).toLocaleDateString('pt-BR')}</p></div>`).join('') : '<p class="text-xs text-slate-400 italic text-center py-6">Tudo em dia.</p>'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </main>
 
                     <!-- MODAL LANÇAMENTO -->
@@ -450,7 +448,7 @@
                                     <div><label class="text-[10px] font-black text-slate-400 uppercase mb-2 block tracking-widest">Responsável</label><select name="profile" class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">${state.profiles.map(p => `<option value="${p}" ${state.activeProfile === p ? 'selected' : ''}>${p}</option>`).join('')}</select></div>
                                 </div>
                                 <div><label class="text-[10px] font-black text-slate-400 uppercase mb-2 block tracking-widest">Parcelas</label><select name="installments" ${state.modalCategory === 'Fixos' ? 'disabled' : ''} class="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 outline-none font-bold">${state.modalCategory === 'Fixos' ? '<option value="1">Mensalidade Recorrente</option>' : (state.modalCategory === 'Financiamento' ? [12, 24, 36, 48, 60, 120, 180, 240, 360].map(n => `<option value="${n}">${n}x parcelas</option>`).join('') : [...Array(24)].map((_, i) => `<option value="${i+1}">${i+1}x sem juros</option>`).join(''))}</select></div>
-                                <button type="submit" ${state.isSaving ? 'disabled' : ''} class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl active:scale-[0.98] transition-all mt-4 flex items-center justify-center gap-2 ${state.isSaving ? 'pointer-events-none opacity-50' : ''}">${state.isSaving ? '<div class="animate-spin h-5 w-5 border-2 border-white/30 border-b-white rounded-full"></div> A gravar...' : 'Guardar na Nuvem'}</button>
+                                <button type="submit" ${state.isSaving ? 'disabled' : ''} class="w-full bg-blue-600 text-white font-black py-6 rounded-3xl shadow-xl active:scale-[0.98] transition-all mt-4 flex items-center justify-center gap-2 ${state.isSaving ? 'pointer-events-none opacity-50' : ''}">${state.isSaving ? '<div class="animate-spin h-5 w-5 border-2 border-white/30 border-b-white rounded-full"></div> A gravar...' : 'Guardar Agora'}</button>
                             </form>
                         </div>
                     </div>
